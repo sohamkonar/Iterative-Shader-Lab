@@ -1,0 +1,55 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f4f7f9;
+    padding: 20px 0;
+}
+
+.card {
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.card-header {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+}
+
+#glCanvas {
+    width: 100%;
+    height: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background-color: #000;
+}
+
+.code-editor {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    resize: vertical;
+}
+
+.iteration-history {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.iteration-item {
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    background-color: #f8f9fa;
+    border-left: 4px solid #007bff;
+}
+
+.iteration-item .metrics {
+    font-size: 0.85rem;
+    color: #6c757d;
+}
+
+.iteration-thumbnail {
+    width: 100px;
+    height: 100px;
+    object-fit: cover;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
