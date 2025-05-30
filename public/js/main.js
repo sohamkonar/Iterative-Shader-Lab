@@ -53,30 +53,20 @@ async function handleGenerateClick() {
     // Get the prompt from the textarea
     const prompt = document.getElementById('shaderPrompt').value.trim();
     
-    if (!prompt) {
-        document.getElementById('shaderError').textContent = 'Please enter a shader description';
-        document.getElementById('shaderError').classList.remove('d-none');
-        return;
-    }
-    
-    // Disable all buttons while processing
     document.getElementById('generateBtn').disabled = true;
     document.getElementById('iterateBtn').disabled = true;
     document.getElementById('compileBtn').disabled = true;
     document.getElementById('generateBtn').textContent = 'Generating...';
-    document.getElementById('shaderError').classList.add('d-none');
-    
-    // Reset iteration counter for a new shader
-    currentIteration = 0;
     
     // Clear previous iteration history
-    localStorage.removeItem('iterationHistory');
+    localStorage.removeItem('shaderIterationHistory');
     updateIterationHistory();
     
     try {
         updateStatusMessage('Generating shader from description...');
         
         // Call the API to generate the shader
+        const prompt = document.getElementById('shaderPrompt').value;
         const result = await generateShader(prompt);
         
         if (result && result.vertexShader && result.fragmentShader) {
@@ -87,11 +77,33 @@ async function handleGenerateClick() {
             // Compile and render the shader
             let success = ShaderRenderer.setupShaderProgram(result.vertexShader, result.fragmentShader);
             
-            // Check more carefully if the shader is actually working
-            let isActuallyWorking = success;
-            
-            // Even if setupShaderProgram returned success, check if rendering is actually visible
-            if (success) {
+            // Start auto-iteration if the shader doesn't compile successfully
+            if (!success) {
+                await autoIterateShader(prompt, result.vertexShader, result.fragmentShader, 0);
+            } else {
+                // Shader compiled successfully on first try
+                // Capture the canvas state
+                const imageData = canvas.toDataURL('image/png');
+                
+                // Log the initial generation as iteration 0
+                logIteration({
+                    iteration: 0,
+                    prompt,
+                    vertexShader: result.vertexShader,
+                    fragmentShader: result.fragmentShader,
+                    success,
+                    metrics: createMetrics(success, null),
+                    imageData,
+                    reflection: '',
+                    isManualIteration: true,
+                    isLastAutoIteration: false
+                });
+                
+                // Update iteration history display
+                updateIterationHistory();
+                
+                // Check if rendering is actually visible (for user feedback only)
+                let isActuallyWorking = true;
                 try {
                     // Get WebGL context and check pixels
                     const gl = canvas.getContext('webgl');
@@ -111,41 +123,17 @@ async function handleGenerateClick() {
                     console.log('Shader visible content check:', isActuallyWorking ? 'Content visible' : 'No visible content');
                 } catch (e) {
                     console.error('Error checking shader output:', e);
-                    // If we can't check, assume it's working if compilation succeeded
                 }
-            }
-            
-            // Capture the canvas state
-            const imageData = canvas.toDataURL('image/png');
-            
-            // Log the initial generation as iteration 0
-            logIteration({
-                iteration: 0,
-                prompt,
-                vertexShader: result.vertexShader,
-                fragmentShader: result.fragmentShader,
-                success,
-                metrics: createMetrics(success, null),
-                imageData,
-                reflection: ''
-            });
-            
-            // Update iteration history display
-            updateIterationHistory();
-            
-            // Always show the feedback field regardless of shader errors
-            document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-            
-            // If the shader compiled and is showing some content, consider it successful
-            if (isActuallyWorking) {
-                updateStatusMessage('Shader generated successfully! Enter what you want to improve and click Iterate.');
-                // Iterate button will be enabled when feedback is entered
-            } else if (success) {
-                // Shader compiles but doesn't show anything visible
-                updateStatusMessage('Shader compiles but isn\'t rendering properly. Enter feedback to improve it.');
-            } else {
-                // Shader doesn't compile at all
-                updateStatusMessage('Shader has compilation errors. Enter feedback to fix specific issues.');
+                
+                // Always show the feedback field regardless of shader errors
+                document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
+                
+                // If the shader compiled but isn't showing content, inform the user
+                if (!isActuallyWorking) {
+                    updateStatusMessage('Shader compiles but isn\'t rendering properly. Enter feedback to improve it.');
+                } else {
+                    updateStatusMessage('Shader generated successfully! Enter what you want to improve and click Iterate.');
+                }
             }
         } else {
             throw new Error('Failed to generate shader. The API response was incomplete.');
@@ -158,9 +146,12 @@ async function handleGenerateClick() {
     } finally {
         // Re-enable all buttons
         document.getElementById('generateBtn').disabled = false;
-        document.getElementById('iterateBtn').disabled = false;
         document.getElementById('compileBtn').disabled = false;
         document.getElementById('generateBtn').textContent = 'Generate Shader';
+        
+        // Only enable iterate button if there's feedback
+        const feedbackText = document.getElementById('iterationFeedback').value.trim();
+        document.getElementById('iterateBtn').disabled = !feedbackText;
     }
 }
 
@@ -262,6 +253,181 @@ function handleCompileClick() {
     ShaderRenderer.setupShaderProgram(vertexSource, fragmentSource);
 }
 
+// Common auto-iteration function used by both handleGenerateClick and handleIterateClick
+async function autoIterateShader(prompt, initialVertexShader, initialFragmentShader, startIteration) {
+    const MAX_AUTO_ITERATIONS = 5; // Maximum number of iterations to attempt
+    let iterationCount = 0;
+    let success = false;
+    let currentIteration = startIteration;
+    let currentVertex = initialVertexShader;
+    let currentFragment = initialFragmentShader;
+    
+    // Clear any previous errors
+    document.getElementById('shaderError').classList.add('d-none');
+    
+    while (!success && iterationCount < MAX_AUTO_ITERATIONS) {
+        iterationCount++;
+        const iterationLabel = `Auto-Iteration ${iterationCount}/${MAX_AUTO_ITERATIONS}`;
+        
+        // Get user feedback (only used for manual iterations, empty for auto-iterations after generate)
+        const feedbackElement = document.getElementById('iterationFeedback');
+        const userFeedback = (startIteration > 0 && iterationCount === 1) ? 
+            (feedbackElement ? feedbackElement.value.trim() : '') : '';
+        
+        // Increment iteration counter
+        currentIteration++;
+        
+        // 1. Evaluate the current shader
+        updateStatusMessage(`${iterationLabel}: Evaluating shader...`);
+        const evaluation = await shaderEvaluator.evaluateShader(currentVertex, currentFragment);
+        
+        // 2. Log evaluation metrics
+        console.log(`${iterationLabel} shader evaluation:`, evaluation);
+        
+        // 3. Prepare simplified evaluation object for API
+        const simplifiedEvaluation = {
+            compiled: evaluation.compilationSuccess || false,
+            infoLog: evaluation.compileErrors || evaluation.linkErrors || '',
+            metrics: evaluation.metrics || {},
+            hasNaNs: evaluation.hasNaNs || false
+        };
+        
+        // 4. Get screenshot
+        const screenshotData = getOptimizedScreenshot(canvas);
+        
+        // 5. Call the /api/iterate endpoint
+        updateStatusMessage(`${iterationLabel}: Generating improved shader...`);
+        
+        let data;
+        try {
+            const response = await fetch('/api/iterate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    prompt: prompt,
+                    currentVertex: currentVertex,
+                    currentFragment: currentFragment,
+                    evaluation: simplifiedEvaluation,
+                    iteration: currentIteration,
+                    screenshots: screenshotData ? [screenshotData] : [],
+                    userFeedback: userFeedback
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Server responded with status: ${response.status}`);
+            }
+            
+            data = await response.json();
+        } catch (fetchError) {
+            console.error(`Error during ${iterationLabel.toLowerCase()}:`, fetchError);
+            
+            if (iterationCount === 1 && startIteration > 0) {
+                // If this is the first manual iteration, fail completely
+                throw fetchError;
+            }
+            
+            // For auto-iterations, try to continue with next iteration
+            updateStatusMessage(`${iterationLabel}: Failed - ${fetchError.message}. Trying again...`);
+            continue;
+        }
+        
+        // 6. Parse the result
+        const result = ShaderRenderer.parseShaders(data.response);
+        
+        // Update the current shaders for the next iteration
+        currentVertex = result.vertexShader;
+        currentFragment = result.fragmentShader;
+        
+        // 7. Update the shader editors
+        document.getElementById('vertexShaderCode').value = result.vertexShader;
+        document.getElementById('fragmentShaderCode').value = result.fragmentShader;
+        
+        // 8. Compile and render the new shader
+        success = ShaderRenderer.setupShaderProgram(result.vertexShader, result.fragmentShader);
+        
+        // If the shader compiles successfully, consider it a success regardless of WebGL errors
+        // This prevents endless iteration when the shader compiles without syntax errors
+        if (success) {
+            // Log any WebGL errors but ignore them for auto-iteration stopping criteria
+            try {
+                const gl = canvas.getContext('webgl');
+                const errors = [];
+                let err;
+                while ((err = gl.getError()) !== gl.NO_ERROR) {
+                    errors.push(err);
+                }
+                
+                if (errors.length > 0) {
+                    console.log(`${iterationLabel}: Shader compiled with WebGL warnings (ignored):`, errors);
+                }
+            } catch (e) {
+                console.error('Error checking WebGL errors:', e);
+            }
+            
+            // If shaders compile successfully, stop auto-iteration regardless of WebGL errors
+            console.log(`${iterationLabel}: Compilation successful - stopping auto-iteration.`);
+        }
+        
+        // Capture the canvas state and metrics for potential logging
+        const imageData = canvas.toDataURL('image/png');
+        const metrics = createMetrics(success, evaluation);
+        
+        // Store iteration data for logging
+        const iterationData = {
+            iteration: currentIteration,
+            prompt,
+            vertexShader: result.vertexShader,
+            fragmentShader: result.fragmentShader,
+            success,
+            metrics,
+            imageData,
+            reflection: data.reflection || 'No reflection provided',
+            // Flag if this is the first manual iteration vs auto-iteration
+            isManualIteration: startIteration > 0 && iterationCount === 1,
+            isLastAutoIteration: success
+        };
+        
+        // For first iteration or successful iterations, always log them
+        if ((startIteration > 0 && iterationCount === 1) || success) {
+            // Log this iteration in history
+            logIteration(iterationData);
+            
+            // Update the UI
+            updateIterationHistory();
+            updateMetricsDisplay(metrics);
+        }
+        
+        if (success) {
+            updateStatusMessage(`${iterationLabel}: Success! Enter new feedback for further improvements.`);
+            
+            // Clear the feedback field and show it for the next iteration
+            if (document.getElementById('iterationFeedback')) {
+                document.getElementById('iterationFeedback').value = '';
+                document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
+            }
+            
+            break;
+        } else if (iterationCount < MAX_AUTO_ITERATIONS) {
+            updateStatusMessage(`${iterationLabel}: Shader still has errors, continuing...`);
+        }
+    }
+    
+    // Always show the feedback field after iterations, even if auto-iteration failed
+    if (document.getElementById('iterationFeedback')) {
+        document.getElementById('iterationFeedback').value = '';
+        document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
+    }
+    
+    if (!success && iterationCount >= MAX_AUTO_ITERATIONS) {
+        updateStatusMessage(`Auto-iteration stopped after ${iterationCount} attempts. Enter specific feedback to fix remaining issues.`);
+        document.getElementById('shaderError').textContent = `Could not automatically fix all shader issues. Try providing specific feedback.`;
+        document.getElementById('shaderError').classList.remove('d-none');
+    }
+    
+    return success;
+}
+
 // Handle Iterate button click with auto-iteration until success
 async function handleIterateClick() {
     // Prevent multiple clicks
@@ -271,190 +437,22 @@ async function handleIterateClick() {
     document.getElementById('iterateBtn').textContent = 'Iterating...';
     
     try {
-        // Clear any previous errors
-        document.getElementById('shaderError').classList.add('d-none');
+        const prompt = document.getElementById('shaderPrompt').value;
+        const currentVertex = document.getElementById('vertexShaderCode').value;
+        const currentFragment = document.getElementById('fragmentShaderCode').value;
         
-        const MAX_AUTO_ITERATIONS = 5; // Maximum number of iterations to attempt
-        let iterationCount = 0;
-        let success = false;
+        // Get current iteration count from history
+        const history = getIterationHistory();
+        const currentIteration = history.length > 0 ? 
+            Math.max(...history.map(item => item.iteration)) : 0;
         
-        while (!success && iterationCount < MAX_AUTO_ITERATIONS) {
-            iterationCount++;
-            const isFirstIteration = iterationCount === 1;
-            const iterationLabel = iterationCount > 1 ? `Auto-Iteration ${iterationCount}/${MAX_AUTO_ITERATIONS}` : 'Iteration';
-            
-            const prompt = document.getElementById('shaderPrompt').value;
-            const currentVertex = document.getElementById('vertexShaderCode').value;
-            const currentFragment = document.getElementById('fragmentShaderCode').value;
-            
-            // Get user feedback for what they want to change (if available)
-            const feedbackElement = document.getElementById('iterationFeedback');
-            const userFeedback = feedbackElement ? feedbackElement.value.trim() : '';
-            
-            // Increment iteration counter
-            currentIteration++;
-            
-            // 1. Evaluate the current shader
-            updateStatusMessage(`${iterationLabel}: Evaluating shader...`);
-            const evaluation = await shaderEvaluator.evaluateShader(currentVertex, currentFragment);
-            
-            // If this is not the first iteration, check if shader already works
-            if (!isFirstIteration && evaluation.compilationSuccess && !evaluation.hasNaNs) {
-                console.log('Shader already compiles successfully and has no NaNs. Stopping auto-iteration.');
-                success = true;
-                updateStatusMessage('Auto-iteration complete: Shader compiles successfully!');
-                break;
-            }
-            
-            // 2. Log evaluation metrics
-            console.log(`${iterationLabel} shader evaluation:`, evaluation);
-            
-            // 3. Prepare simplified evaluation object for API
-            const simplifiedEvaluation = {
-                compiled: evaluation.compilationSuccess || false,
-                infoLog: evaluation.compileErrors || evaluation.linkErrors || '',
-                metrics: evaluation.metrics || {},
-                hasNaNs: evaluation.hasNaNs || false
-            };
-            
-            // 4. Get screenshot
-            const screenshotData = getOptimizedScreenshot(canvas);
-            
-            // 5. Call the /api/iterate endpoint
-            updateStatusMessage(`${iterationLabel}: Generating improved shader...`);
-            
-            let data;
-            try {
-                const response = await fetch('/api/iterate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        currentVertex: currentVertex,
-                        currentFragment: currentFragment,
-                        evaluation: simplifiedEvaluation,
-                        iteration: currentIteration,
-                        screenshots: screenshotData ? [screenshotData] : [],
-                        userFeedback: userFeedback
-                    })
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Server responded with status: ${response.status}`);
-                }
-                
-                data = await response.json();
-            } catch (fetchError) {
-                console.error(`Error during ${iterationLabel.toLowerCase()}:`, fetchError);
-                
-                if (iterationCount === 1) {
-                    // If this is the first iteration, fail completely
-                    throw fetchError;
-                }
-                
-                // For auto-iterations, try to continue with next iteration
-                updateStatusMessage(`${iterationLabel}: Failed - ${fetchError.message}. Trying again...`);
-                continue;
-            }
-            
-            // 6. Parse the result
-            const result = ShaderRenderer.parseShaders(data.response);
-            
-            // 7. Update the shader editors
-            document.getElementById('vertexShaderCode').value = result.vertexShader;
-            document.getElementById('fragmentShaderCode').value = result.fragmentShader;
-            
-            // 8. Compile and render the new shader
-            success = ShaderRenderer.setupShaderProgram(result.vertexShader, result.fragmentShader);
-            
-            // If the shader compiles successfully, consider it a success regardless of WebGL errors
-            // This prevents endless iteration when the shader compiles without syntax errors
-            if (success) {
-                // Log any WebGL errors but ignore them for auto-iteration stopping criteria
-                try {
-                    const gl = canvas.getContext('webgl');
-                    const errors = [];
-                    let err;
-                    while ((err = gl.getError()) !== gl.NO_ERROR) {
-                        errors.push(err);
-                    }
-                    
-                    if (errors.length > 0) {
-                        console.log(`${iterationLabel}: Shader compiled with WebGL warnings (ignored):`, errors);
-                    }
-                } catch (e) {
-                    console.error('Error checking WebGL errors:', e);
-                }
-                
-                // If shaders compile successfully, stop auto-iteration regardless of WebGL errors
-                console.log(`${iterationLabel}: Compilation successful - stopping auto-iteration.`);
-            }
-            
-            // Capture the canvas state and metrics for potential logging
-            const imageData = canvas.toDataURL('image/png');
-            const metrics = createMetrics(success, evaluation);
-            
-            // Store iteration data in a temporary variable for logging later
-            // Only log the final result after auto-iteration is complete
-            const iterationData = {
-                iteration: currentIteration,
-                prompt,
-                vertexShader: result.vertexShader,
-                fragmentShader: result.fragmentShader,
-                success,
-                metrics,
-                imageData,
-                reflection: data.reflection || 'No reflection provided',
-                // Flag if this is the first manual iteration vs auto-iteration
-                isManualIteration: iterationCount === 1,
-                isLastAutoIteration: false
-            };
-            
-            // For first iteration or successful iterations, always log them
-            if (iterationCount === 1 || success) {
-                // If this is successful, mark it as the last auto-iteration
-                if (success) {
-                    iterationData.isLastAutoIteration = true;
-                }
-                
-                // Log this iteration in history
-                logIteration(iterationData);
-                
-                // Update the UI
-                updateIterationHistory();
-                updateMetricsDisplay(metrics);
-            }
-            
-            if (success) {
-                updateStatusMessage(`${iterationLabel}: Success! Enter new feedback for further improvements.`);
-                
-                // Clear the feedback field and show it for the next iteration
-                if (document.getElementById('iterationFeedback')) {
-                    document.getElementById('iterationFeedback').value = '';
-                    document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-                }
-                
-                break;
-            } else if (iterationCount < MAX_AUTO_ITERATIONS) {
-                updateStatusMessage(`${iterationLabel}: Shader still has errors, continuing...`);
-            }
-        }
-        
-        // Always show the feedback field after iterations, even if auto-iteration failed
-        if (document.getElementById('iterationFeedback')) {
-            document.getElementById('iterationFeedback').value = '';
-            document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-        }
-        
-        if (!success && iterationCount >= MAX_AUTO_ITERATIONS) {
-            updateStatusMessage(`Auto-iteration stopped after ${iterationCount} attempts. Enter specific feedback to fix remaining issues.`);
-            document.getElementById('shaderError').textContent = `Could not automatically fix all shader issues. Try providing specific feedback.`;
-            document.getElementById('shaderError').classList.remove('d-none');
-        }
+        // Start auto-iteration
+        await autoIterateShader(prompt, currentVertex, currentFragment, currentIteration);
     } catch (error) {
         console.error('Error iterating shader:', error);
         document.getElementById('shaderError').textContent = `Error iterating shader: ${error.message}`;
         document.getElementById('shaderError').classList.remove('d-none');
+        updateStatusMessage('Failed to iterate shader.');
     } finally {
         document.getElementById('generateBtn').disabled = false;
         document.getElementById('compileBtn').disabled = false;
