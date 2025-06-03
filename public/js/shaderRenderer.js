@@ -12,8 +12,7 @@ let shaderProgram;
 let positionBuffer;
 
 // Fixed vertex shader (not editable by users)
-const fixedVertexShader = `
-attribute vec2 position;
+const fixedVertexShader = `attribute vec2 position;
 varying vec2 vUv;
 
 void main() {
@@ -22,8 +21,7 @@ void main() {
 }`;
 
 // Default fragment shader
-const defaultFragmentShader = `
-precision mediump float;
+const defaultFragmentShader = `precision mediump float;
 varying vec2 vUv;
 uniform float uTime;
 uniform vec2 uResolution;

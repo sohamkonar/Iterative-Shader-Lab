@@ -23,10 +23,11 @@ The system enables real-time rendering of shaders and captures performance metri
 - **Screenshot Evidence**: Sends rendered results to the LLM for visual feedback on iterations
 
 ### Developer Experience
-- **User-Friendly Interface**: Clean UI with separate code editor, rendering canvas, and feedback panels
+- **User-Friendly Interface**: Clean three-column layout with Shader Description, Shader Preview & Iteration History, and Shader Code section
 - **Helpful Status Messages**: Clear guidance on what's happening and what to do next
-- **Visual Iteration History**: Track the evolution of your shader with screenshots and metrics
-- **Compilation Metrics**: Get detailed information on compilation success, warnings, and performance
+- **Visual Iteration History**: Track the evolution of your shader with screenshots and iteration labels
+- **Auto-Growing Textareas**: Textareas that automatically expand as you type
+- **Speech-to-Text Input**: Dictate shader descriptions and feedback using your microphone
 
 ### Architecture & Technical Features
 - **Modular Design**: Separation of concerns with dedicated modules for rendering, evaluation, and UI
@@ -51,10 +52,13 @@ The system enables real-time rendering of shaders and captures performance metri
 npm install
 ```
 
-3. Create a `.env` file in the root directory with your OpenAI API key:
+3. Create a `.env` file in the root directory with the following environment variables:
 
 ```
 OPENAI_API_KEY=your_api_key_here
+OPENAI_MODEL_NAME="your_finetuned_model_name" # Optional: name of fine-tuned model
+OPENAI_BASE_MODEL="gpt-4.1-mini" # Base model to use (default: gpt-4.1-mini)
+USE_FINETUNED_MODEL=false # Set to true to use OPENAI_MODEL_NAME instead of OPENAI_BASE_MODEL
 ```
 
 ### Running the Application
@@ -83,18 +87,20 @@ node server.js
 
 2. **Iterate the Shader**: Click "Iterate" to send your feedback to the LLM along with the current shader code and a screenshot of the rendering. The LLM will analyze these inputs and generate an improved version.
 
-3. **Auto-Iteration for Errors**: If your shader has compilation errors, the system will automatically attempt to fix them through multiple iterations until the shader compiles successfully.
+3. **Auto-Iteration for Errors**: If your shader has compilation errors, the system will automatically attempt to fix them through multiple iterations until the shader compiles successfully. Auto-iterations don't affect the main iteration numbering, making the history easier to track.
 
 ### Advanced Features
 
 1. **Manual Editing**: You can directly edit the shader code in the editor tabs and click "Compile & Render" to see your changes.
 
-2. **Iteration History**: The right panel shows your shader's evolution through different iterations. Each entry displays:
+2. **Iteration History**: The middle column shows your shader's evolution through different iterations. Each entry displays:
    - A thumbnail of the rendered result
-   - Iteration number and success status
-   - Performance metrics
+   - Iteration label ("Initial Generation" or "Iteration X") and success status
+   - Click on any thumbnail to restore that shader version
 
-3. **Shader Metrics**: View compiled metrics about your shader's performance characteristics and complexity.
+3. **Speech Recognition**: Click the microphone icon to dictate your shader description or iteration feedback instead of typing.
+
+4. **Auto-Growing Textareas**: Description and feedback textareas automatically expand as you type or dictate text, providing a seamless user experience.
 
 ## Implementation Details
 
@@ -118,7 +124,7 @@ The application follows a modular design with clear separation of concerns:
 
 3. **Shader Evaluation**: Analyzes shaders for compilation errors, performance issues, and quality metrics.
 
-4. **Iteration System**: Combines LLM capabilities with user feedback to progressively improve shaders.
+4. **Iteration System**: Combines LLM capabilities with user feedback to progressively improve shaders. Includes smart iteration numbering that maintains "Initial Generation" label regardless of auto-iterations and numbers manual iterations correctly.
 
 ## Troubleshooting
 
@@ -147,39 +153,63 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ```
 /public
   /assets      # Test scene images and textures
-  /css         # Stylesheets
+  /css
+    styles.css        # Main stylesheet for the application
   /js
     main.js            # Application orchestration logic and UI interactions
     shaderRenderer.js  # WebGL initialization and shader rendering module
     shaderEvaluator.js # Shader evaluation, metrics, and quality assessment
-  index.html   # Main UI
-server.js      # Express server and API endpoints
+  index.html   # Main UI with three-column layout
+/logs          # Directory for LLM interaction logs
+/screenshots   # Directory for shader render screenshots
+server.js      # Express server and API endpoints with LLM integration
 package.json   # Dependencies and project configuration
-.env           # Environment variables (API keys)
+.env           # Environment variables (API keys and model configuration)
 ```
 
 ## Development
 
-### Mock Mode
+### LLM Model Configuration
 
-For development purposes, the application includes a mock LLM API that returns predefined shaders based on keywords in the prompt. To use a real LLM API, you'll need to modify the `/api/generate-shader` endpoint in `server.js` to connect to your preferred LLM provider.
+The application connects to OpenAI's API and can be configured to use different models:
 
-### Adding New Shader Effects
+- Set `USE_FINETUNED_MODEL=true` to use a custom fine-tuned model specified in `OPENAI_MODEL_NAME`
+- Set `USE_FINETUNED_MODEL=false` to use the base model specified in `OPENAI_BASE_MODEL`
+- If values are missing, the system falls back to using GPT-4.1-mini
 
-To add new shader effects to the mock LLM:
+### Comprehensive Logging System
 
-1. Open `server.js`
-2. Find the `/api/generate-shader` route
-3. Add a new condition and shader template based on keywords
+The application includes a detailed logging system that captures:
 
-## Evaluation Metrics
+- Timestamped JSON log files for all LLM interactions
+- Complete request messages sent to the LLM
+- Full LLM responses
+- Performance metrics and evaluation data
+- Screenshot data (when included in iterations)
 
-The system evaluates shaders based on the following metrics:
+Logs are stored in a dedicated 'logs' directory with unique filenames that include the interaction type and timestamp.
 
-- Compilation success
-- Performance characteristics (heavy operations, loops, etc.)
-- Code complexity
-- Visual interest heuristics
+### Available Shader Uniforms
+
+The following uniforms are available for use in your shaders:
+
+- `uTime` (float): Time in seconds for animations
+- `uResolution` (vec2): Canvas dimensions in pixels
+- `uMouse` (vec2): Normalized mouse position (0.0-1.0)
+- `uMouseClick` (vec2): Normalized position of the last mouse click
+- `uIsMouseDown` (int): Boolean flag for mouse button state
+- `uFrame` (int): Frame counter for animation control
+- `uAspect` (float): Canvas aspect ratio for proper proportions
+- `uTexture0`, `uTexture1` (sampler2D): Texture samplers for image inputs
+
+## Evaluation Points
+
+Shader success is evaluated based on:
+
+- Compilation success in WebGL environment
+- Visual output rendering correctly
+- Meeting the user's described requirements
+- Performance optimizations
 
 ## License
 

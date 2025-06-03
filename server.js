@@ -5,7 +5,36 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { Configuration, OpenAIApi } = require('openai');
+const OpenAI = require('openai');
+
+// Determine which model to use based on environment variables
+function getModelToUse() {
+  // Check if we should use the fine-tuned model
+  const useFinetuned = process.env.USE_FINETUNED_MODEL === 'true' || process.env.USE_FINETUNED_MODEL === true;
+  
+  let model;
+  if (useFinetuned && process.env.OPENAI_MODEL_NAME) {
+    // Use fine-tuned model if explicitly requested and available
+    model = process.env.OPENAI_MODEL_NAME;
+    console.log(`Using finetuned model: ${model}`);
+  } else if (process.env.OPENAI_BASE_MODEL) {
+    // Otherwise use the base model if available
+    model = process.env.OPENAI_BASE_MODEL;
+    console.log(`Using base model: ${model}`);
+  } else {
+    // Fall back to gpt-4.1-mini as default
+    model = "gpt-4.1-mini";
+    console.log(`Using default model: ${model}`);
+  }
+  
+  // Ensure we always return a valid model name
+  if (!model || model.trim() === '') {
+    console.log('No valid model found in environment, falling back to gpt-4.1-mini');
+    return "gpt-4.1-mini";
+  }
+  
+  return model;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,10 +46,10 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const configuration = new Configuration({
-  apiKey: OPENAI_API_KEY,
+// Initialize OpenAI client with API key
+const openai = new OpenAI({
+  apiKey: OPENAI_API_KEY
 });
-const openai = new OpenAIApi(configuration);
 
 // Enable CORS and JSON parsing
 app.use(cors());
@@ -49,18 +78,41 @@ app.post('/api/generate-shader', async (req, res) => {
   const { prompt } = req.body;
   
   try {
-    // Call OpenAI API
-    const completion = await openai.createChatCompletion({
-      model: "gpt-4.1-mini",
+    // Call OpenAI API - for initial generation, use the finetuned model
+    // This is one of the two places where the finetuned model should be used
+    // (the other is the first manual iteration)
+    let modelToUse = getModelToUse();
+    
+    // Ensure we have a valid model to use
+    if (!modelToUse || modelToUse.trim() === '') {
+      console.log('modelToUse is empty or undefined in shader generation, falling back to gpt-4.1-mini');
+      modelToUse = 'gpt-4.1-mini';
+    }
+    
+    console.log(`Using model for initial shader generation: ${modelToUse} (finetuned model if available)`);
+    
+    // Determine if we're using the finetuned model to include specific instructions
+    const usingFinetunedModel = process.env.USE_FINETUNED_MODEL === 'true';
+    
+    // Base system content that's common to both models
+    let systemContent = "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. You have been finetuned on a large collection of Shadertoy examples. Write high-quality, efficient WebGL fragment shaders based on descriptions.\n\nCRITICAL REQUIREMENT: YOUR RESPONSE MUST INCLUDE ACTUAL SHADER CODE. Do not just discuss techniques or examples without implementing them.\n\nIMPORTANT REFERENCE APPROACH:\n- Use your knowledge of Shadertoy examples as reference for the requested effect\n- Keep explanations brief (max 2-3 sentences) about what techniques you're using\n- DO NOT copy or paste descriptions from Shadertoy without implementation\n- Focus on implementing the shader rather than just discussing examples\n\nSTRICT OUTPUT FORMAT (YOU MUST FOLLOW THIS EXACTLY):\n1. Brief explanation (2-3 sentences maximum)\n2. The '#-- FRAGMENT SHADER --#' marker\n3. Your complete, working shader code\n\nEXACT FORMAT EXAMPLE:\nI'm implementing this effect using ray marching with soft shadows. I'm taking inspiration from volumetric lighting techniques commonly used in atmospheric shaders.\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\n\nvoid main() {\n  // shader code here\n}\n\nCODE REQUIREMENTS:\n- Your code MUST be compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n- Focus on implementing a working shader that matches the request\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions";
+    
+    // Add special instructions for the finetuned model
+    if (usingFinetunedModel) {
+      systemContent += "\n\nSPECIAL INSTRUCTIONS FOR FINETUNED MODEL:\n- Use the training data ONLY as examples to reference concepts and techniques\n- DO NOT copy code directly from training examples\n- Instead, derive inspiration and apply similar techniques creatively\n- Your output MUST adhere exactly to the specified format with the '#-- FRAGMENT SHADER --#' separator\n- Ensure your shader code is original while building on concepts from the training data\n- Focus on producing high-quality, creative, and functional shader code that matches the requested description";
+    }
+    
+    const completion = await openai.chat.completions.create({
+      model: modelToUse,
       messages: [
-        { "role": "system", "content": "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. Write high-quality, efficient WebGL fragment shaders based on descriptions.\n\nIMPORTANT OUTPUT FORMAT:\n- Start with any explanation or commentary about your approach\n- Use the '#-- FRAGMENT SHADER --#' marker to clearly separate your commentary from the shader code\n- After the marker, ONLY include valid GLSL code starting with 'precision mediump float;'\n- Do not include any commentary or text within the fragment shader code section\n\nExample correct format:\n[Your explanation here...]\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\nvoid main() {\n  // shader code\n}\n\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides the fragment shader with normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions" },
+        { "role": "system", "content": systemContent },
         { "role": "user", "content": `Create a shader that produces: ${prompt}` }
-      ],
+      ]
     });
 
     // There are no screenshots in the initial generation request, but we'll add the field for consistency
     res.json({ 
-      response: completion.data.choices[0].message.content,
+      response: completion.choices[0].message.content,
       savedScreenshots: []
     });
   } catch (error) {
@@ -70,7 +122,11 @@ app.post('/api/generate-shader', async (req, res) => {
 });
 
 // Reflexion-based shader iteration endpoint
-app.post('/api/iterate', async (req, res) => {
+app.post('/api/iterate-shader', async (req, res) => {
+  // Declare variables at the function scope so they're available throughout the function
+  let modelToUse;
+  let supportsImageInput = false;
+  let savedScreenshots = [];
   console.log('=== ITERATE ENDPOINT CALLED ===');
   console.log('Request body keys:', Object.keys(req.body));
   
@@ -79,15 +135,15 @@ app.post('/api/iterate', async (req, res) => {
     const requestSize = JSON.stringify(req.body).length;
     console.log(`Request size: ${requestSize} bytes`);
     
-    const { prompt, currentFragment, evaluation, screenshots = [], iteration = 0 } = req.body;
+    const { prompt, fragmentShader, userFeedback, screenshots = [], iteration = 0, isAutoIteration = false } = req.body;
     console.log('Prompt length:', prompt ? prompt.length : 'undefined');
-    console.log('Current fragment shader length:', currentFragment ? currentFragment.length : 'undefined');
-    console.log('Evaluation:', JSON.stringify(evaluation));
+    console.log('Current fragment shader length:', fragmentShader ? fragmentShader.length : 'undefined');
+    console.log('User feedback:', userFeedback || 'None provided');
     console.log('Iteration:', iteration);
     console.log('Screenshots count:', screenshots.length);
     
-    // Initialize savedScreenshots array
-    let savedScreenshots = [];
+    // Process screenshots if available
+    savedScreenshots = [];
     
     // Save screenshots to the screenshots directory
     if (screenshots.length > 0) {
@@ -102,17 +158,28 @@ app.post('/api/iterate', async (req, res) => {
     const TARGET_SSIM = 0.85;
     
     // Validate required inputs
-    if (!currentFragment) {
+    if (!fragmentShader) {
       console.log('ERROR: Missing fragment shader code');
       return res.status(400).json({ error: 'Missing fragment shader code' });
     }
     
     // Create messages array starting with the system prompt
     console.log('Creating messages array for OpenAI API...');
+    // Determine if we're using the finetuned model to include specific instructions
+    const usingFinetunedModel = process.env.USE_FINETUNED_MODEL === 'true';
+    
+    // Base system content that's common to both models
+    let systemContent = "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. You have been finetuned on a large collection of Shadertoy examples. Implement Reflexion-style self-improvement to iteratively refine shader code based on feedback.\n\nCRITICAL REQUIREMENT: YOUR RESPONSE MUST INCLUDE ACTUAL IMPROVED SHADER CODE. Do not just discuss techniques or examples without implementing them.\n\nIMPORTANT REFERENCE APPROACH:\n- Use your knowledge of Shadertoy examples as reference for the requested fixes\n- Keep explanations brief (max 2-3 sentences) about what issues you're addressing\n- DO NOT copy or paste descriptions from Shadertoy without implementation\n- Focus on implementing the fixes rather than just discussing approaches\n\nSTRICT OUTPUT FORMAT (YOU MUST FOLLOW THIS EXACTLY):\n1. Brief reflection on issues (2-3 sentences maximum)\n2. The '#-- FRAGMENT SHADER --#' marker\n3. Your complete, working improved shader code\n\nEXACT FORMAT EXAMPLE:\nI've fixed the shadowing artifacts by adjusting the ray marching epsilon value and improving the normal calculation precision. I've also optimized the lighting calculations to reduce unnecessary iterations.\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\n\nvoid main() {\n  // improved shader code here\n}\n\nCODE REQUIREMENTS:\n- Your code MUST be compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n- Focus on implementing a working shader that addresses the feedback\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions\n\nIMPORTANT DEBUGGING APPROACH:\n- Analyze compilation errors and visual issues carefully\n- Ensure numerical stability in mathematical operations\n- Fix edge cases and potential divide-by-zero scenarios\n- Optimize for performance where possible\n- Verify your fixes with mental tracing of the shader execution";
+    
+    // Add special instructions for the finetuned model
+    if (usingFinetunedModel) {
+      systemContent += "\n\nSPECIAL INSTRUCTIONS FOR FINETUNED MODEL:\n- Use the training data ONLY as examples to reference concepts and techniques\n- DO NOT copy code directly from training examples\n- Instead, derive inspiration and apply similar techniques creatively\n- Your output MUST adhere exactly to the specified format with the '#-- FRAGMENT SHADER --#' separator\n- Ensure your shader code is original while building on concepts from the training data\n- Focus on producing high-quality, creative fixes that address the specific issues while maintaining the shader's intended functionality";
+    }
+    
     const messages = [
       {
         "role": "system", 
-        "content": "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. Implement Reflexion-style self-improvement to iteratively refine shader code based on feedback.\n\nIMPORTANT OUTPUT FORMAT:\n- Begin with your reflection and analysis of the issues\n- Provide a brief explanation of your approach to fixing the problems\n- Use the '#-- FRAGMENT SHADER --#' marker to clearly separate your commentary from the shader code\n- After the marker, ONLY include valid GLSL code starting with 'precision mediump float;'\n- Do not include any commentary or text within the fragment shader code section\n\nExample correct format:\n[Your reflection and explanation here...]\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\nvoid main() {\n  // shader code\n}\n\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides the fragment shader with normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions\n\nReflection Process:\n1. Analyze any compilation errors or visual issues carefully\n2. Start with a brief one-sentence reflection on what needs to be fixed\n3. Apply systematic debugging when fixing issues\n4. Ensure numerical stability in mathematical operations\n5. Optimize for performance where possible"
+        "content": systemContent
       }
     ];
     
@@ -124,41 +191,62 @@ app.post('/api/iterate', async (req, res) => {
       console.log('Adding previous shader code as assistant message');
       messages.push({
         "role": "assistant",
-        "content": `${currentFragment}`
+        "content": `${fragmentShader}`
       });
       
-      // Create a text feedback message based on the evaluation and user feedback
-      console.log('Creating feedback text based on evaluation and user feedback...');
+      // Determine which model to use - MOVED UP BEFORE SCREENSHOT PROCESSING
+      // Following specific rules for model selection:
+      // 1. Only use finetuned model for initial generation and first manual iteration
+      // 2. Use gpt-4.1-mini for all auto-iterations and subsequent manual iterations
+      
+      if (isAutoIteration) {
+        // For auto-iteration, always use gpt-4.1-mini
+        modelToUse = "gpt-4.1-mini";
+        supportsImageInput = true; // gpt-4.1-mini supports image input
+        console.log(`Auto-iteration flag is true. Using model: ${modelToUse}`);
+      } else {
+        // For manual iterations, only use finetuned model for the first iteration (iteration = 0)
+        if (iteration === 0) {
+          // First manual iteration - use finetuned model if available
+          modelToUse = getModelToUse();
+          console.log(`First manual iteration. Using model from settings: ${modelToUse}`);
+        } else {
+          // Subsequent manual iterations - always use gpt-4.1-mini
+          modelToUse = "gpt-4.1-mini";
+          console.log(`Subsequent manual iteration (${iteration}). Using model: ${modelToUse}`);
+        }
+        
+        // Check if the model supports image input
+        // Currently only certain OpenAI models support image input
+        const imageCompatibleModels = [
+          'gpt-4-vision-preview', 'gpt-4-turbo', 'gpt-4-turbo-preview', 
+          'gpt-4-1106-vision-preview', 'gpt-4-0125-preview',
+          'gpt-4.1-preview', 'gpt-4.1-mini', 'gpt-4-1106-preview',
+          'gpt-4o', 'gpt-4o-mini'
+        ];
+        
+        supportsImageInput = imageCompatibleModels.includes(modelToUse);
+        console.log(`Manual iteration. Using model: ${modelToUse} (${supportsImageInput ? 'supports' : 'does not support'} image input)`);
+      }
+      
+      // Create a text feedback message based on the iteration number and user feedback
+      console.log('Creating feedback text based on iteration number and user feedback...');
       let feedbackText = `Iteration ${iteration}: Evaluate and improve the previous shader `;
       
       // Add user's specific feedback if available
       if (req.body.userFeedback) {
         console.log('User provided specific feedback:', req.body.userFeedback);
         feedbackText = `Iteration ${iteration}: ${req.body.userFeedback}\n\nEvaluate and improve the shader according to this user feedback. `;
-      }
-      
-      // Add evaluation feedback if available
-      if (evaluation) {
-        const evalSummary = {
-          compiled: evaluation.compiled,
-          hasNaNs: evaluation.hasNaNs || false,
-          metrics: evaluation.metrics || {}
-        };
-        
-        if (evaluation.infoLog) {
-          evalSummary.errors = evaluation.infoLog;
-        }
-        
-        feedbackText += `based on this feedback: ${JSON.stringify(evalSummary, null, 2)}`;
       } else {
+        // If no specific user feedback, use a default message
         feedbackText += 'to make it more efficient and visually appealing.';
       }
       
       feedbackText += '\n\nWrite a brief one-sentence reflection identifying the key issues. Then provide the complete improved shader code.';
       
-      // Check if we can include images
-      if (screenshots && screenshots.length > 0) {
-        // Use text-only message if we can't process images
+      // Check if we can include images - only for models that support image input
+      if (screenshots && screenshots.length > 0 && supportsImageInput) {
+        // Process images only if the model supports image input
         console.log('Processing screenshot for API request');
         try {
           // Try to create a message with images
@@ -221,6 +309,11 @@ app.post('/api/iterate', async (req, res) => {
           });
         }
       } else {
+        // For models that don't support image input or if no screenshots are available
+        if (screenshots && screenshots.length > 0 && !supportsImageInput) {
+          console.log('Model does not support image input. Using text-only message.');
+        }
+        
         // Text-only message
         messages.push({
           "role": "user",
@@ -239,26 +332,30 @@ app.post('/api/iterate', async (req, res) => {
     console.log('Preparing to call OpenAI API...');
     console.log('Messages count:', messages.length);
     try {
-      // Log the model being used
-      console.log('Using model: gpt-4.1-mini');
       
       // Call the API with detailed error handling
       console.log('Making API call...');
-      const completion = await openai.createChatCompletion({
-        model: "gpt-4.1-mini",
-        messages: messages,
+      
+      // Ensure we have a valid model to use
+      if (!modelToUse || modelToUse.trim() === '') {
+        console.log('modelToUse is empty or undefined, falling back to gpt-4.1-mini');
+        modelToUse = 'gpt-4.1-mini';
+      }
+      
+      console.log(`Using model for API call: ${modelToUse}`);
+      const completion = await openai.chat.completions.create({
+        model: modelToUse,
+        messages: messages
       });
       
       console.log('API call successful!');
-      console.log('Response status:', completion.status);
-      console.log('Response headers:', JSON.stringify(completion.headers));
       
-      if (!completion.data || !completion.data.choices || !completion.data.choices[0]) {
-        console.error('Unexpected API response structure:', JSON.stringify(completion.data));
+      if (!completion || !completion.choices || !completion.choices[0]) {
+        console.error('Unexpected API response structure:', JSON.stringify(completion));
         throw new Error('Invalid API response structure');
       }
       
-      const responseContent = completion.data.choices[0].message.content;
+      const responseContent = completion.choices[0].message.content;
       console.log('Response content length:', responseContent.length);
       console.log('Response preview:', responseContent.substring(0, 100) + '...');
       

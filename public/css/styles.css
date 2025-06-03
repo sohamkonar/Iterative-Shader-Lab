@@ -41,6 +41,16 @@ body {
 .card-header {
     background-color: var(--card-header-bg);
     border-bottom: 1px solid var(--btn-border);
+    padding: 1rem;
+    display: flex;
+    align-items: center;
+    height: 3.5rem;
+}
+
+.card-header h5 {
+    margin: 0;
+    padding: 0;
+    line-height: 1.5;
 }
 
 #glCanvas {

@@ -41,6 +41,26 @@ function initWebGL() {
         document.getElementById('iterateBtn').addEventListener('click', handleIterateClick);
         document.getElementById('themeToggle').addEventListener('click', toggleTheme);
         
+        // Add clear functionality to generate button if the clear buttons don't exist
+        const clearGenerateBtn = document.getElementById('clearGenerateBtn');
+        if (clearGenerateBtn) {
+            clearGenerateBtn.addEventListener('click', () => {
+                const promptTextarea = document.getElementById('shaderPrompt');
+                promptTextarea.value = '';
+                promptTextarea.focus();
+            });
+        }
+        
+        // Add clear functionality to iterate button if the clear buttons don't exist
+        const clearIterateBtn = document.getElementById('clearIterateBtn');
+        if (clearIterateBtn) {
+            clearIterateBtn.addEventListener('click', () => {
+                const feedbackTextarea = document.getElementById('iterationFeedback');
+                feedbackTextarea.value = '';
+                feedbackTextarea.focus();
+            });
+        }
+        
         // Initialize CodeMirror editor with default fragment shader code
         const textArea = document.getElementById('fragmentShaderCode');
         shaderEditor = CodeMirror.fromTextArea(textArea, {
@@ -97,6 +117,7 @@ async function handleGenerateClick() {
     
     // Reset iteration counter when generating a new shader
     iterationCounter = 0;
+    let autoIterationCount = 0;
     
     try {
         updateStatusMessage('Generating shader from description...');
@@ -112,11 +133,10 @@ async function handleGenerateClick() {
             // Compile and render the shader with our fixed vertex shader
             compilationSuccess = ShaderRenderer.setupShaderProgram(result);
             
-            // Start auto-iteration if the shader doesn't compile successfully
             if (!compilationSuccess) {
-                // Increment counter for the first iteration
-                iterationCounter++;
-                await autoIterateShader(prompt, result, iterationCounter);
+                // Don't increment the iteration counter for auto-iterations of the initial generation
+                // Instead, pass a flag to indicate we're auto-fixing the initial generation
+                await autoIterateShader(prompt, result, iterationCounter, null, true);
             } else {
                 // Shader compiled successfully on first try
                 // Try to ensure we have the latest rendered frame
@@ -466,20 +486,25 @@ function handleCompileClick() {
 }
 
 // Common auto-iteration function used by both handleGenerateClick and handleIterateClick
-async function autoIterateShader(prompt, initialFragmentShader, currentIteration, userFeedback = null) {
-    const MAX_AUTO_ITERATIONS = 3;
+async function autoIterateShader(prompt, initialFragmentShader, currentIteration, userFeedback = null, isAutoFixingInitialGeneration = false) {
+    const MAX_AUTO_ITERATIONS = 10;
     let autoIterationCount = 0; // Count auto-iterations separately
     let currentFragmentShader = initialFragmentShader;
     let success = false;
     
     // Find the iterate button to update during auto-iterations
     const iterateBtn = document.getElementById('iterateBtn');
-    updateStatusMessage(`Iteration ${currentIteration}...`);
+    // Display appropriate message based on whether we're auto-fixing the initial generation or doing a manual iteration
+    if (isAutoFixingInitialGeneration) {
+        updateStatusMessage(`Auto-fixing initial generation...`);
+    } else {
+        updateStatusMessage(`Iteration ${currentIteration}...`);
+    }
     
     try {
         while (autoIterationCount < MAX_AUTO_ITERATIONS) {
             // Update button text to show simple 'Iterating' text with animation
-            startButtonAnimation(iterateBtn, 'Iterating');
+            startButtonAnimation(iterateBtn, isAutoFixingInitialGeneration ? 'Auto-fixing' : 'Iterating');
             
             // Get the evaluation from our shader evaluator
             let evaluation = null;
@@ -508,7 +533,9 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
             
             // Save the current state of the iteration with its screenshot before requesting improvements
             logIteration({
-                iteration: currentIteration,
+                // If we're auto-fixing the initial generation, keep iteration number at 0
+                // Otherwise use the current iteration number
+                iteration: isAutoFixingInitialGeneration ? 0 : currentIteration,
                 prompt,
                 fragmentShader: currentFragmentShader,
                 success: false, // It's not successful yet, that's why we're iterating
@@ -523,17 +550,23 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
             updateIterationHistory();
             
             try {
-                // Call the API to refine the shader
-                const response = await fetch('/api/iterate', {
+                // Call API to iterate the shader
+                const response = await fetch('/api/iterate-shader', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
                     body: JSON.stringify({
-                        prompt, 
-                        currentFragment: currentFragmentShader,
-                        evaluation,
+                        prompt,
+                        fragmentShader: currentFragmentShader,
                         screenshots: screenshot ? [screenshot] : [],
-                        iteration: currentIteration - 1, // Use the previous iteration number since we incremented it
-                        userFeedback: userFeedback || 'Fix the shader compilation errors and improve the visual quality'
+                        // If we're auto-fixing the initial generation, use 0
+                        // Otherwise use the previous iteration number
+                        iteration: isAutoFixingInitialGeneration ? 0 : (currentIteration - 1),
+                        userFeedback: userFeedback || 'Fix the shader compilation errors and improve the visual quality',
+                        // This indicates whether this is an automatic iteration (which should use gpt-4.1-mini)
+                        // or a manual iteration (which should use the model specified in server settings)
+                        isAutoIteration: isAutoFixingInitialGeneration || !userFeedback
                     })
                 });
                 
@@ -584,8 +617,10 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
                 }
                 
                 // Now we're processing the next iteration with the updated shader
-                // Increment iteration counter for the next iteration
-                currentIteration++;
+                // Only increment iteration counter for the next iteration if it's not auto-fixing the initial generation
+                if (!isAutoFixingInitialGeneration) {
+                    currentIteration++;
+                }
                 
                 // We don't log this iteration here - we'll log it at the beginning of the next loop
                 // or after we break out of the loop (if this was successful or the last iteration)
@@ -601,7 +636,8 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
                     
                     // Log the final iteration state
                     logIteration({
-                        iteration: currentIteration,
+                        // Keep the iteration number at 0 for initial generation auto-fixes
+                        iteration: isAutoFixingInitialGeneration ? 0 : currentIteration,
                         prompt,
                         fragmentShader: currentFragmentShader,
                         success,
@@ -616,7 +652,11 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
                     updateIterationHistory();
                 }
                 
-                updateStatusMessage(`Iteration ${currentIteration} successful!`);
+                if (isAutoFixingInitialGeneration) {
+                    updateStatusMessage(`Auto-fixing successful!`);
+                } else {
+                    updateStatusMessage(`Iteration ${currentIteration} successful!`);
+                }
                 autoIterationCount++;
                 
                 if (success) {
@@ -626,7 +666,11 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
                 
                 // Continue to the next auto-iteration if we haven't reached the limit
                 if (autoIterationCount < MAX_AUTO_ITERATIONS) {
-                    updateStatusMessage(`Auto-iteration ${autoIterationCount + 1}/${MAX_AUTO_ITERATIONS}...`);
+                    if (isAutoFixingInitialGeneration) {
+                        updateStatusMessage(`Auto-fixing attempt ${autoIterationCount + 1}/${MAX_AUTO_ITERATIONS}...`);
+                    } else {
+                        updateStatusMessage(`Auto-iteration ${autoIterationCount + 1}/${MAX_AUTO_ITERATIONS}...`);
+                    }
                 }
             } catch (error) {
                 console.error('Error during auto-iteration:', error);
@@ -645,9 +689,17 @@ async function autoIterateShader(prompt, initialFragmentShader, currentIteration
         if (success) {
             document.getElementById('iterateBtn').disabled = false;
             document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-            updateStatusMessage('Shader compiled successfully! Enter what you want to improve and click Iterate.');
+            if (isAutoFixingInitialGeneration) {
+                updateStatusMessage('Initial shader generated successfully! Enter what you want to improve and click Iterate.');
+            } else {
+                updateStatusMessage('Shader compiled successfully! Enter what you want to improve and click Iterate.');
+            }
         } else {
-            updateStatusMessage('Auto-iteration complete, but shader still has errors. Try manual edits.');
+            if (isAutoFixingInitialGeneration) {
+                updateStatusMessage('Auto-fixing complete, but initial shader still has errors. Try manual edits.');
+            } else {
+                updateStatusMessage('Auto-iteration complete, but shader still has errors. Try manual edits.');
+            }
             document.getElementById('iterateBtn').disabled = true;
             document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
         }
@@ -693,7 +745,7 @@ async function handleIterateClick() {
         // Increment the global iteration counter
         iterationCounter++;
         // Pass the user's feedback to autoIterateShader
-        await autoIterateShader(prompt, fragmentShaderCode, iterationCounter, feedbackText);
+        await autoIterateShader(prompt, fragmentShaderCode, iterationCounter, feedbackText, false);
         
         // Ensure the button animation is stopped (in case autoIterateShader didn't)
         const iterateBtn = document.getElementById('iterateBtn');
@@ -826,10 +878,15 @@ function updateIterationHistory() {
     // We only want to show the final result of each generation or iteration
     let significantIterations = [];
     
-    // First, find the initial shader generation (iteration 0)
-    const initialGeneration = history.find(item => item.iteration === 0);
-    if (initialGeneration) {
-        significantIterations.push(initialGeneration);
+    // First, find the final auto-iteration for the initial shader generation (iteration 0)
+    // We want the last auto-iteration that represents the final state of the initial generation
+    const initialGenerations = history.filter(item => item.iteration === 0);
+    if (initialGenerations.length > 0) {
+        // Find the last auto-iteration marked as the final one or successful one
+        const finalInitialGen = initialGenerations.find(item => item.isLastAutoIteration && item.success) || 
+                                initialGenerations.find(item => item.isLastAutoIteration) || 
+                                initialGenerations[initialGenerations.length - 1];
+        significantIterations.push(finalInitialGen);
     }
     
     // Then, find the first iteration and any successful iteration that completes auto-iteration
@@ -862,6 +919,8 @@ function updateIterationHistory() {
             // Update UI based on compilation result
             document.getElementById('iterateBtn').disabled = !success;
             
+            // Create the proper iteration label for the status message
+            let iterationLabel = item.iteration === 0 ? 'Initial Generation' : `Iteration ${item.iteration}`;
             // Show a message
             updateStatusMessage(`Restored ${iterationLabel}`);
         });
@@ -870,7 +929,8 @@ function updateIterationHistory() {
         const header = document.createElement('div');
         header.className = 'fw-bold';
         
-        // Label generation vs iteration properly
+        // Label generation vs iteration properly, always using a consistent naming scheme
+        // regardless of how many auto-fixes were needed
         let iterationLabel = item.iteration === 0 ? 'Initial Generation' : `Iteration ${item.iteration}`;
         header.textContent = `${iterationLabel}: ${item.success ? 'Success' : 'Failed'}`;
         
@@ -1007,7 +1067,7 @@ function initSpeechRecognition(buttonId, textareaId) {
     recognition.interimResults = true;
     recognition.lang = 'en-US';
     
-    // Silence detection - will stop recording after 3 seconds of silence
+    // Silence detection - will stop recording after 2 seconds of silence
     const SILENCE_TIMEOUT = 2000; // 2 seconds
     let silenceTimer = null;
     
@@ -1043,6 +1103,8 @@ function initSpeechRecognition(buttonId, textareaId) {
     // Store the original text that was in the textarea before recording started
     let originalText = '';
     
+
+    
     // Handle results
     recognition.onresult = (event) => {
         // Reset silence timer whenever speech is detected
@@ -1056,6 +1118,8 @@ function initSpeechRecognition(buttonId, textareaId) {
                 recognition.stop();
             }
         }, SILENCE_TIMEOUT);
+        
+
         
         let interimTranscript = '';
         finalTranscript = '';
@@ -1093,6 +1157,10 @@ function initSpeechRecognition(buttonId, textareaId) {
         
         // Update the textarea with the complete text
         textarea.value = newText;
+        
+        // Trigger the auto-grow function to resize the textarea in real-time during speech
+        const inputEvent = new Event('input', { bubbles: true, cancelable: true });
+        textarea.dispatchEvent(inputEvent);
     };
     
     // Handle end of speech recognition
@@ -1101,14 +1169,18 @@ function initSpeechRecognition(buttonId, textareaId) {
         micButton.classList.remove('recording');
         micButton.title = 'Use speech-to-text';
         
-        // Manually trigger an input event on the textarea to enable buttons
-        // This is needed because the automatic silence detection doesn't trigger an input event
+        // Add a period at the end if there's text and it doesn't already end with punctuation
         if (textarea.value.trim().length > 0) {
-            // Create and dispatch an input event
-            const inputEvent = new Event('input', {
-                bubbles: true,
-                cancelable: true,
-            });
+            let currentText = textarea.value.trim();
+            const lastChar = currentText.slice(-1);
+            
+            // Add period if there's no punctuation at the end
+            if (!/[.!?;:]/.test(lastChar)) {
+                textarea.value = currentText + '. ';
+            }
+            
+            // Dispatch an input event to trigger any listeners (enable buttons, etc.)
+            const inputEvent = new Event('input', { bubbles: true, cancelable: true });
             textarea.dispatchEvent(inputEvent);
         }
     };
@@ -1120,8 +1192,26 @@ function initSpeechRecognition(buttonId, textareaId) {
         micButton.classList.remove('recording');
         micButton.title = 'Use speech-to-text';
         
-        // Also trigger an input event in case of error to ensure buttons are enabled
+        // Clear any pause timer
+        if (pauseTimer) {
+            clearTimeout(pauseTimer);
+            pauseTimer = null;
+        }
+        
+        // Add period at the end if needed, same as in onend handler
         if (textarea.value.trim().length > 0) {
+            let currentText = textarea.value.trim();
+            const lastChar = currentText.slice(-1);
+            
+            // Replace trailing comma with period
+            if (lastChar === ',') {
+                textarea.value = currentText.slice(0, -1) + '.';
+            }
+            // Add period if there's no ending punctuation
+            else if (!/[.!?;:]/.test(lastChar)) {
+                textarea.value = currentText + '.';
+            }
+            
             // Create and dispatch an input event
             const inputEvent = new Event('input', {
                 bubbles: true,
@@ -1132,14 +1222,87 @@ function initSpeechRecognition(buttonId, textareaId) {
     };
 }
 
+/**
+ * Make a textarea auto-grow as content is added
+ * @param {HTMLTextAreaElement} textarea - The textarea element to make auto-growing
+ */
+function makeTextareaAutoGrow(textarea) {
+    // Function to adjust height based on content
+    const adjustHeight = () => {
+        // Reset height to default to get the proper scrollHeight
+        textarea.style.height = 'auto';
+        
+        // Set the height to match the content, plus a little extra for padding
+        const newHeight = Math.max(textarea.scrollHeight, parseInt(textarea.getAttribute('data-min-height') || 0));
+        textarea.style.height = newHeight + 'px';
+    };
+    
+    // Store original height as minimum height
+    if (!textarea.getAttribute('data-min-height')) {
+        // Get computed style to find the actual rendered height
+        const computedStyle = window.getComputedStyle(textarea);
+        const originalHeight = textarea.offsetHeight || 
+                             (parseInt(computedStyle.paddingTop) + 
+                              parseInt(computedStyle.paddingBottom) + 
+                              parseInt(computedStyle.lineHeight) * parseInt(textarea.rows || 3));
+        
+        textarea.setAttribute('data-min-height', originalHeight);
+    }
+    
+    // Add event listeners for input and focus
+    textarea.addEventListener('input', adjustHeight);
+    textarea.addEventListener('focus', adjustHeight);
+    
+    // Initial adjustment
+    adjustHeight();
+}
+
 // Initialize WebGL when the DOM is fully loaded
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize WebGL
     initWebGL();
     
-    // Initialize speech recognition for shader prompt and iteration feedback
-    initSpeechRecognition('shaderPromptMic', 'shaderPrompt');
-    initSpeechRecognition('iterationFeedbackMic', 'iterationFeedback');
+    // Initialize speech recognition for the textareas
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        initSpeechRecognition('shaderPromptMic', 'shaderPrompt');
+        initSpeechRecognition('iterationFeedbackMic', 'iterationFeedback');
+    } else {
+        // Hide the microphone buttons if speech recognition is not available
+        document.querySelectorAll('.mic-btn').forEach(btn => btn.classList.add('d-none'));
+    }
+    
+    // Make textareas auto-grow
+    const autoGrowTextareas = [
+        document.getElementById('shaderPrompt'),
+        document.getElementById('iterationFeedback')
+    ];
+    
+    autoGrowTextareas.forEach(textarea => {
+        if (textarea) {
+            makeTextareaAutoGrow(textarea);
+        }
+    });
+    
+    // For textareas that might be dynamically shown later
+    const autoGrowObserver = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                const target = mutation.target;
+                if (target.id === 'iterationFeedbackContainer' && !target.classList.contains('d-none')) {
+                    const textarea = document.getElementById('iterationFeedback');
+                    if (textarea) {
+                        makeTextareaAutoGrow(textarea);
+                    }
+                }
+            }
+        });
+    });
+    
+    // Observe the iteration feedback container for when it becomes visible
+    const feedbackContainer = document.getElementById('iterationFeedbackContainer');
+    if (feedbackContainer) {
+        autoGrowObserver.observe(feedbackContainer, { attributes: true });
+    }
     
     // Initialize theme after DOM is loaded
     initTheme();
