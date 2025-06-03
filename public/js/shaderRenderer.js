@@ -2,6 +2,7 @@
 
 /**
  * Shader Renderer - Handles WebGL initialization, shader compilation and rendering
+ * Following the Shadertoy model where only fragment shaders are editable
  */
 
 // Global variables
@@ -10,20 +11,27 @@ let canvas;
 let shaderProgram;
 let positionBuffer;
 
-// Default shaders
-const defaultVertexShader = `
-attribute vec4 aVertexPosition;
+// Fixed vertex shader (not editable by users)
+const fixedVertexShader = `
+attribute vec2 position;
 varying vec2 vUv;
 
 void main() {
-    vUv = aVertexPosition.xy * 0.5 + 0.5;
-    gl_Position = aVertexPosition;
+    vUv = position * 0.5 + 0.5; // Map from [-1,1] to [0,1]
+    gl_Position = vec4(position, 0.0, 1.0);
 }`;
 
+// Default fragment shader
 const defaultFragmentShader = `
 precision mediump float;
 varying vec2 vUv;
 uniform float uTime;
+uniform vec2 uResolution;
+uniform vec2 uMouse;
+uniform vec2 uMouseClick;
+uniform int uIsMouseDown;
+uniform int uFrame;
+uniform float uAspect;
 
 void main() {
     vec2 uv = vUv;
@@ -45,9 +53,12 @@ function initWebGL(canvasElement, onShaderSetupComplete = null) {
         throw new Error('Unable to initialize WebGL. Your browser may not support it.');
     }
 
-    // Set up initial program with default shaders
-    setupShaderProgram(defaultVertexShader, defaultFragmentShader);
+    // Set up initial program with default fragment shader and fixed vertex shader
+    setupShaderProgram(defaultFragmentShader);
     initBuffers();
+
+    // Set up mouse tracking for interactive shaders
+    setupMouseTracking(canvas);
 
     // Optional callback for when setup is complete
     if (onShaderSetupComplete) {
@@ -57,16 +68,55 @@ function initWebGL(canvasElement, onShaderSetupComplete = null) {
     return gl;
 }
 
+// Mouse state for shader uniforms
+let mousePosition = { x: 0, y: 0 };
+let lastClickPosition = { x: 0, y: 0 };
+let isMouseDown = false;
+let frameCount = 0;
+
+/**
+ * Setup mouse tracking for interactive shaders
+ * @param {HTMLCanvasElement} canvas - The canvas element to track mouse on
+ */
+function setupMouseTracking(canvas) {
+    canvas.addEventListener('mousemove', (event) => {
+        const rect = canvas.getBoundingClientRect();
+        // Normalize coordinates to [0,1] range
+        mousePosition.x = (event.clientX - rect.left) / rect.width;
+        mousePosition.y = 1.0 - (event.clientY - rect.top) / rect.height; // Flip y-axis to match WebGL
+        
+        // If mouse is down, also update lastClickPosition to track dragging
+        if (isMouseDown) {
+            lastClickPosition.x = mousePosition.x;
+            lastClickPosition.y = mousePosition.y;
+        }
+    });
+    
+    canvas.addEventListener('mousedown', (event) => {
+        isMouseDown = true;
+        const rect = canvas.getBoundingClientRect();
+        lastClickPosition.x = (event.clientX - rect.left) / rect.width;
+        lastClickPosition.y = 1.0 - (event.clientY - rect.top) / rect.height;
+    });
+    
+    canvas.addEventListener('mouseup', () => {
+        isMouseDown = false;
+    });
+    
+    canvas.addEventListener('mouseleave', () => {
+        isMouseDown = false;
+    });
+}
+
 /**
  * Set up shader program
- * @param {string} vsSource - Vertex shader source code
  * @param {string} fsSource - Fragment shader source code
  * @returns {boolean} - True if setup was successful
  */
-function setupShaderProgram(vsSource, fsSource) {
+function setupShaderProgram(fsSource) {
     try {
-        // Create shader program
-        const vertexShader = loadShader(gl.VERTEX_SHADER, vsSource);
+        // Create shader program using the fixed vertex shader and provided fragment shader
+        const vertexShader = loadShader(gl.VERTEX_SHADER, fixedVertexShader);
         const fragmentShader = loadShader(gl.FRAGMENT_SHADER, fsSource);
         
         // Create the shader program
@@ -81,31 +131,21 @@ function setupShaderProgram(vsSource, fsSource) {
             throw new Error(`Unable to initialize the shader program: ${errorLog}`);
         }
         
-        // Get attribute and uniform locations
-        // Try common vertex attribute names - first aVertexPosition, then position, then a_position
-        const posAttribNames = ['aVertexPosition', 'aPosition', 'position', 'a_position', 'pos', 'a_vertex'];
+        // Get position attribute location (from our fixed vertex shader)
+        shaderProgram.vertexPosition = gl.getAttribLocation(shaderProgram, 'position');
         
-        // Find the first attribute name that exists in the shader
-        for (const attribName of posAttribNames) {
-            const attribLoc = gl.getAttribLocation(shaderProgram, attribName);
-            if (attribLoc !== -1) {
-                shaderProgram.vertexPosition = attribLoc;
-                shaderProgram.vertexAttribName = attribName;
-                console.log(`Using vertex attribute: ${attribName}`);  
-                break;
-            }
-        }
-        
-        // If no valid position attribute found, use a default attribute
-        if (shaderProgram.vertexPosition === undefined || shaderProgram.vertexPosition === -1) {
-            // Log a warning but don't fail - we'll handle this in drawScene
+        if (shaderProgram.vertexPosition === -1) {
             console.warn('No valid vertex position attribute found in shader');
-            shaderProgram.vertexPosition = -1;
         }
         
         // Get common uniform locations
         shaderProgram.timeUniform = gl.getUniformLocation(shaderProgram, 'uTime');
         shaderProgram.resolutionUniform = gl.getUniformLocation(shaderProgram, 'uResolution');
+        shaderProgram.mouseUniform = gl.getUniformLocation(shaderProgram, 'uMouse');
+        shaderProgram.mouseClickUniform = gl.getUniformLocation(shaderProgram, 'uMouseClick');
+        shaderProgram.isMouseDownUniform = gl.getUniformLocation(shaderProgram, 'uIsMouseDown');
+        shaderProgram.frameUniform = gl.getUniformLocation(shaderProgram, 'uFrame');
+        shaderProgram.aspectUniform = gl.getUniformLocation(shaderProgram, 'uAspect');
         
         // Clear any previous errors in UI if available
         const errorElement = document.getElementById('shaderError');
@@ -192,6 +232,9 @@ function drawScene(time) {
     // Use shader program
     gl.useProgram(shaderProgram);
     
+    // Increment frame counter
+    frameCount++;
+    
     // Set the shader uniforms if they exist
     if (shaderProgram.timeUniform) {
         gl.uniform1f(shaderProgram.timeUniform, time);
@@ -201,7 +244,27 @@ function drawScene(time) {
         gl.uniform2f(shaderProgram.resolutionUniform, canvas.width, canvas.height);
     }
     
-    // Only set up vertex attributes if we found a valid position attribute
+    if (shaderProgram.mouseUniform) {
+        gl.uniform2f(shaderProgram.mouseUniform, mousePosition.x, mousePosition.y);
+    }
+    
+    if (shaderProgram.mouseClickUniform) {
+        gl.uniform2f(shaderProgram.mouseClickUniform, lastClickPosition.x, lastClickPosition.y);
+    }
+    
+    if (shaderProgram.isMouseDownUniform) {
+        gl.uniform1i(shaderProgram.isMouseDownUniform, isMouseDown ? 1 : 0);
+    }
+    
+    if (shaderProgram.frameUniform) {
+        gl.uniform1i(shaderProgram.frameUniform, frameCount);
+    }
+    
+    if (shaderProgram.aspectUniform) {
+        gl.uniform1f(shaderProgram.aspectUniform, canvas.width / canvas.height);
+    }
+    
+    // Set up vertex attributes 
     if (shaderProgram.vertexPosition !== -1) {
         // Set up vertex attributes
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -254,61 +317,49 @@ function sanitizeShaderCode(code) {
 }
 
 /**
- * Parse LLM response to extract vertex and fragment shader code
+ * Parse LLM response to extract fragment shader code
  * @param {string} response - Raw LLM response text
- * @returns {{vertexShader: string, fragmentShader: string}} - Extracted shader code
+ * @returns {string} - Extracted fragment shader code
  */
 function parseShaders(response) {
-    const vertexMarker = '#-- VERTEX SHADER --#';
     const fragmentMarker = '#-- FRAGMENT SHADER --#';
     
-    // Check if response has markers
-    if (response.includes(vertexMarker) && response.includes(fragmentMarker)) {
-        // Split by markers and extract vertex and fragment shader code
-        const vertexStart = response.indexOf(vertexMarker) + vertexMarker.length;
+    // Check if response has fragment marker
+    if (response.includes(fragmentMarker)) {
+        // Extract fragment shader code
         const fragmentStart = response.indexOf(fragmentMarker) + fragmentMarker.length;
-        
-        let vertexCode = '';
-        let fragmentCode = '';
-        
-        if (fragmentStart > vertexStart) {
-            // Normal order: vertex then fragment
-            vertexCode = response.substring(vertexStart, response.indexOf(fragmentMarker)).trim();
-            fragmentCode = response.substring(fragmentStart).trim();
-        } else {
-            // Reverse order: fragment then vertex
-            fragmentCode = response.substring(fragmentStart, response.indexOf(vertexMarker)).trim();
-            vertexCode = response.substring(vertexStart).trim();
-        }
-        
-        return {
-            vertexShader: sanitizeShaderCode(vertexCode),
-            fragmentShader: sanitizeShaderCode(fragmentCode)
-        };
+        const fragmentCode = response.substring(fragmentStart).trim();
+        return sanitizeShaderCode(fragmentCode);
     }
     
-    // If no markers, try to identify by common GLSL patterns
-    // Assume shader with precision declaration is fragment shader
-    if (response.includes('precision')) {
-        const parts = response.split('precision');
-        if (parts.length >= 2) {
-            // The first part might contain vertex shader code
-            const vertexCandidate = sanitizeShaderCode(parts[0]);
-            // Recombine the rest with 'precision' keyword
-            const fragmentCandidate = sanitizeShaderCode('precision' + parts.slice(1).join('precision'));
-            
-            return {
-                vertexShader: vertexCandidate,
-                fragmentShader: fragmentCandidate
-            };
-        }
+    // If no marker, assume the entire response is fragment shader code
+    // We'll sanitize to remove markdown and non-GLSL content
+    return sanitizeShaderCode(response);
+}
+
+/**
+ * Check if a shader program is currently compiled and ready
+ * @returns {boolean} - True if the shader program is compiled and ready
+ */
+function isCompiled() {
+    return shaderProgram !== null && shaderProgram !== undefined;
+}
+
+/**
+ * Manually trigger a frame render
+ * @returns {boolean} - True if rendering was successful
+ */
+function renderFrame() {
+    if (!isCompiled()) {
+        return false;
     }
     
-    // Default: assume the entire response is fragment shader code
-    return {
-        vertexShader: defaultVertexShader,
-        fragmentShader: sanitizeShaderCode(response)
-    };
+    // Get current time
+    const currentTime = performance.now() / 1000.0;
+    
+    // Draw the scene with current time
+    drawScene(currentTime);
+    return true;
 }
 
 // Export as ES module
@@ -322,6 +373,8 @@ export {
     parseShaders,
     sanitizeShaderCode,
     getShaderProgram,
-    defaultVertexShader,
+    isCompiled,
+    renderFrame,
+    fixedVertexShader,
     defaultFragmentShader
 };

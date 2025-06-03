@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const { Configuration, OpenAIApi } = require('openai');
 
 const app = express();
@@ -31,6 +32,17 @@ app.use(express.static('public'));
 app.use('/js', express.static(path.join(__dirname, 'public/js')));
 // Serve CSS files
 app.use('/css', express.static(path.join(__dirname, 'public/css')));
+// Serve screenshots
+app.use('/screenshots', express.static(path.join(__dirname, 'screenshots')));
+
+// Ensure screenshots directory exists
+const screenshotsDir = path.join(__dirname, 'screenshots');
+if (!fs.existsSync(screenshotsDir)) {
+  fs.mkdirSync(screenshotsDir, { recursive: true });
+  console.log('Created screenshots directory:', screenshotsDir);
+} else {
+  console.log('Screenshots directory exists:', screenshotsDir);
+}
 
 // LLM-powered shader generation endpoint
 app.post('/api/generate-shader', async (req, res) => {
@@ -41,12 +53,16 @@ app.post('/api/generate-shader', async (req, res) => {
     const completion = await openai.createChatCompletion({
       model: "gpt-4.1-mini",
       messages: [
-        { "role": "system", "content": "You are an expert GLSL shader programmer. Write high-quality, efficient WebGL shaders based on descriptions.\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Use precision mediump float; at the start of fragment shaders\n- Return both vertex and fragment shaders\n- Make sure uniforms are consistent between vertex and fragment shaders\n- Available uniforms: uTime (float), uResolution (vec2)\n- Format output with clear separators like #-- VERTEX SHADER --# and #-- FRAGMENT SHADER --#" },
+        { "role": "system", "content": "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. Write high-quality, efficient WebGL fragment shaders based on descriptions.\n\nIMPORTANT OUTPUT FORMAT:\n- Start with any explanation or commentary about your approach\n- Use the '#-- FRAGMENT SHADER --#' marker to clearly separate your commentary from the shader code\n- After the marker, ONLY include valid GLSL code starting with 'precision mediump float;'\n- Do not include any commentary or text within the fragment shader code section\n\nExample correct format:\n[Your explanation here...]\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\nvoid main() {\n  // shader code\n}\n\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides the fragment shader with normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions" },
         { "role": "user", "content": `Create a shader that produces: ${prompt}` }
       ],
     });
 
-    res.json({ response: completion.data.choices[0].message.content });
+    // There are no screenshots in the initial generation request, but we'll add the field for consistency
+    res.json({ 
+      response: completion.data.choices[0].message.content,
+      savedScreenshots: []
+    });
   } catch (error) {
     console.error('Error calling OpenAI API:', error);
     res.status(500).json({ error: 'Failed to generate shader' });
@@ -63,25 +79,32 @@ app.post('/api/iterate', async (req, res) => {
     const requestSize = JSON.stringify(req.body).length;
     console.log(`Request size: ${requestSize} bytes`);
     
-    const { prompt, currentVertex, currentFragment, evaluation, screenshots = [], iteration = 0 } = req.body;
+    const { prompt, currentFragment, evaluation, screenshots = [], iteration = 0 } = req.body;
     console.log('Prompt length:', prompt ? prompt.length : 'undefined');
-    console.log('Current vertex shader length:', currentVertex ? currentVertex.length : 'undefined');
     console.log('Current fragment shader length:', currentFragment ? currentFragment.length : 'undefined');
     console.log('Evaluation:', JSON.stringify(evaluation));
     console.log('Iteration:', iteration);
     console.log('Screenshots count:', screenshots.length);
+    
+    // Initialize savedScreenshots array
+    let savedScreenshots = [];
+    
+    // Save screenshots to the screenshots directory
     if (screenshots.length > 0) {
       console.log('First screenshot length:', screenshots[0].length);
       console.log('Screenshot type:', screenshots[0].substring(0, 30) + '...');
+      
+      // Save each screenshot to disk and get filenames
+      savedScreenshots = saveScreenshots(screenshots, iteration);
     }
     
     const MAX_ITERATIONS = 5;
     const TARGET_SSIM = 0.85;
     
     // Validate required inputs
-    if (!currentVertex || !currentFragment) {
-      console.log('ERROR: Missing shader code');
-      return res.status(400).json({ error: 'Missing shader code' });
+    if (!currentFragment) {
+      console.log('ERROR: Missing fragment shader code');
+      return res.status(400).json({ error: 'Missing fragment shader code' });
     }
     
     // Create messages array starting with the system prompt
@@ -89,7 +112,7 @@ app.post('/api/iterate', async (req, res) => {
     const messages = [
       {
         "role": "system", 
-        "content": "You are an expert GLSL shader programmer implementing Reflexion-style self-improvement. Write high-quality, efficient WebGL shaders based on descriptions and feedback.\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Use precision mediump float; at the start of fragment shaders\n- Return both vertex and fragment shaders\n- Make sure uniforms are consistent between vertex and fragment shaders\n- Available uniforms: uTime (float), uResolution (vec2)\n- Format output with clear separators like #-- VERTEX SHADER --# and #-- FRAGMENT SHADER --#"
+        "content": "You are an expert GLSL shader programmer specializing in fragment shaders like those used in Shadertoy. Implement Reflexion-style self-improvement to iteratively refine shader code based on feedback.\n\nIMPORTANT OUTPUT FORMAT:\n- Begin with your reflection and analysis of the issues\n- Provide a brief explanation of your approach to fixing the problems\n- Use the '#-- FRAGMENT SHADER --#' marker to clearly separate your commentary from the shader code\n- After the marker, ONLY include valid GLSL code starting with 'precision mediump float;'\n- Do not include any commentary or text within the fragment shader code section\n\nExample correct format:\n[Your reflection and explanation here...]\n\n#-- FRAGMENT SHADER --#\nprecision mediump float;\nvoid main() {\n  // shader code\n}\n\nFollow these guidelines:\n- Ensure your code is compilable in WebGL (GLSL ES 1.0)\n- Your code will run in a fixed vertex shader environment that provides the fragment shader with normalized UV coordinates in a varying called 'vUv'\n- You only need to write the fragment shader - DO NOT include any vertex shader code\n\nAvailable uniforms:\n- uTime (float): Time in seconds for animations\n- uResolution (vec2): Canvas dimensions in pixels\n- uMouse (vec2): Normalized mouse position (0.0-1.0)\n- uMouseClick (vec2): Normalized position of the last mouse click\n- uIsMouseDown (int): Boolean flag for mouse button state\n- uFrame (int): Frame counter for animation control\n- uAspect (float): Canvas aspect ratio for proper proportions\n\nReflection Process:\n1. Analyze any compilation errors or visual issues carefully\n2. Start with a brief one-sentence reflection on what needs to be fixed\n3. Apply systematic debugging when fixing issues\n4. Ensure numerical stability in mathematical operations\n5. Optimize for performance where possible"
       }
     ];
     
@@ -101,7 +124,7 @@ app.post('/api/iterate', async (req, res) => {
       console.log('Adding previous shader code as assistant message');
       messages.push({
         "role": "assistant",
-        "content": `#-- VERTEX SHADER --#\n${currentVertex}\n\n#-- FRAGMENT SHADER --#\n${currentFragment}`
+        "content": `${currentFragment}`
       });
       
       // Create a text feedback message based on the evaluation and user feedback
@@ -256,7 +279,8 @@ app.post('/api/iterate', async (req, res) => {
       res.json({
         response: responseContent,
         reflection: reflection,
-        iteration: iteration
+        iteration: iteration,
+        savedScreenshots: savedScreenshots || []
       });
     } catch (apiError) {
       console.error('OpenAI API call failed:', apiError);
@@ -292,6 +316,47 @@ app.post('/api/iterate', async (req, res) => {
 app.use((req, res) => {
   res.status(404).send('404: Page not found');
 });
+
+/**
+ * Save screenshots to the screenshots directory
+ * @param {Array<string>} screenshots - Array of base64 encoded screenshots
+ * @param {number} iteration - Current iteration number
+ * @returns {Array<string>} - Array of saved screenshot filenames
+ */
+function saveScreenshots(screenshots, iteration) {
+  const savedScreenshots = [];
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    
+    screenshots.forEach((screenshot, index) => {
+      // Only process if it's a valid data URL
+      if (screenshot && screenshot.startsWith('data:image')) {
+        // Extract the base64 data and image type
+        const matches = screenshot.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        
+        if (matches && matches.length === 3) {
+          const imageType = matches[1];
+          const base64Data = matches[2];
+          const extension = imageType.split('/')[1] || 'png';
+          
+          // Create filename with iteration, timestamp, and index
+          const filename = `screenshot_iter${iteration}_${timestamp}_${index}.${extension}`;
+          const filePath = path.join(screenshotsDir, filename);
+          
+          // Write the file to disk
+          fs.writeFileSync(filePath, base64Data, 'base64');
+          console.log(`Saved screenshot to ${filePath}`);
+          
+          // Add the filename to the return array
+          savedScreenshots.push(filename);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error saving screenshots:', error);
+  }
+  return savedScreenshots;
+}
 
 // Start server
 app.listen(PORT, () => {

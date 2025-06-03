@@ -9,6 +9,8 @@ let canvas;
 let gl;
 let shaderEvaluator;
 let currentIteration = 0;
+let shaderEditor; // CodeMirror editor instance
+let buttonAnimationInterval = null; // For button loading animation
 
 // Initialize WebGL
 function initWebGL() {
@@ -37,10 +39,33 @@ function initWebGL() {
         document.getElementById('generateBtn').addEventListener('click', handleGenerateClick);
         document.getElementById('compileBtn').addEventListener('click', handleCompileClick);
         document.getElementById('iterateBtn').addEventListener('click', handleIterateClick);
+        document.getElementById('themeToggle').addEventListener('click', toggleTheme);
         
-        // Initialize text areas with default shader code
-        document.getElementById('vertexShaderCode').value = ShaderRenderer.defaultVertexShader;
-        document.getElementById('fragmentShaderCode').value = ShaderRenderer.defaultFragmentShader;
+        // Initialize CodeMirror editor with default fragment shader code
+        const textArea = document.getElementById('fragmentShaderCode');
+        shaderEditor = CodeMirror.fromTextArea(textArea, {
+            mode: 'x-shader/x-fragment',
+            theme: 'monokai',
+            lineNumbers: true,
+            matchBrackets: true,
+            indentUnit: 4,
+            lineWrapping: true,
+            tabSize: 4,
+            autofocus: false,
+            readOnly: false
+        });
+        
+        // Set the default fragment shader code
+        shaderEditor.setValue(ShaderRenderer.defaultFragmentShader);
+        
+        // Make the CodeMirror instance fill its container nicely
+        shaderEditor.setSize('100%', '350px');
+        
+        // Hide the vertex shader tab as we're only using fragment shaders now
+        const vertexTab = document.getElementById('vertex-tab');
+        if (vertexTab) {
+            vertexTab.classList.add('d-none');
+        }
     } catch (error) {
         alert('WebGL initialization error: ' + error.message);
     }
@@ -52,15 +77,26 @@ function initWebGL() {
 async function handleGenerateClick() {
     // Get the prompt from the textarea
     const prompt = document.getElementById('shaderPrompt').value.trim();
+    // Track if compilation succeeds, used later in finally block
+    let compilationSuccess = false;
     
-    document.getElementById('generateBtn').disabled = true;
-    document.getElementById('iterateBtn').disabled = true;
-    document.getElementById('compileBtn').disabled = true;
-    document.getElementById('generateBtn').textContent = 'Generating...';
+    const generateBtn = document.getElementById('generateBtn');
+    const iterateBtn = document.getElementById('iterateBtn');
+    const compileBtn = document.getElementById('compileBtn');
+    
+    generateBtn.disabled = true;
+    iterateBtn.disabled = true;
+    compileBtn.disabled = true;
+    
+    // Start animation for generate button
+    startButtonAnimation(generateBtn, 'Generating');
     
     // Clear previous iteration history
     localStorage.removeItem('shaderIterationHistory');
     updateIterationHistory();
+    
+    // Reset iteration counter when generating a new shader
+    iterationCounter = 0;
     
     try {
         updateStatusMessage('Generating shader from description...');
@@ -69,35 +105,37 @@ async function handleGenerateClick() {
         const prompt = document.getElementById('shaderPrompt').value;
         const result = await generateShader(prompt);
         
-        if (result && result.vertexShader && result.fragmentShader) {
-            // Update the shader editors
-            document.getElementById('vertexShaderCode').value = result.vertexShader;
-            document.getElementById('fragmentShaderCode').value = result.fragmentShader;
+        if (result) {
+            // Update the CodeMirror editor with the fragment shader code
+            shaderEditor.setValue(result);
             
-            // Compile and render the shader
-            let success = ShaderRenderer.setupShaderProgram(result.vertexShader, result.fragmentShader);
+            // Compile and render the shader with our fixed vertex shader
+            compilationSuccess = ShaderRenderer.setupShaderProgram(result);
             
             // Start auto-iteration if the shader doesn't compile successfully
-            if (!success) {
-                await autoIterateShader(prompt, result.vertexShader, result.fragmentShader, 0);
+            if (!compilationSuccess) {
+                // Increment counter for the first iteration
+                iterationCounter++;
+                await autoIterateShader(prompt, result, iterationCounter);
             } else {
                 // Shader compiled successfully on first try
+                // Try to ensure we have the latest rendered frame
+                ShaderRenderer.renderFrame();
                 // Capture the canvas state
                 const imageData = canvas.toDataURL('image/png');
                 
-                // Log the initial generation as iteration 0
+                // Log the initial generation with the current iteration counter
                 logIteration({
-                    iteration: 0,
+                    iteration: iterationCounter,
                     prompt,
-                    vertexShader: result.vertexShader,
-                    fragmentShader: result.fragmentShader,
-                    success,
-                    metrics: createMetrics(success, null),
+                    fragmentShader: result,
+                    success: compilationSuccess,
+                    metrics: createMetrics(compilationSuccess, null),
                     imageData,
                     reflection: '',
                     isManualIteration: true,
                     isLastAutoIteration: false
-                });
+                }, []); // Initial generation doesn't have saved screenshots yet
                 
                 // Update iteration history display
                 updateIterationHistory();
@@ -144,14 +182,16 @@ async function handleGenerateClick() {
         document.getElementById('shaderError').classList.remove('d-none');
         updateStatusMessage('Failed to generate shader.');
     } finally {
-        // Re-enable all buttons
-        document.getElementById('generateBtn').disabled = false;
-        document.getElementById('compileBtn').disabled = false;
-        document.getElementById('generateBtn').textContent = 'Generate Shader';
+        // Stop the button animation and restore the button
+        const generateBtn = document.getElementById('generateBtn');
+        const compileBtn = document.getElementById('compileBtn');
         
-        // Only enable iterate button if there's feedback
-        const feedbackText = document.getElementById('iterationFeedback').value.trim();
-        document.getElementById('iterateBtn').disabled = !feedbackText;
+        stopButtonAnimation(generateBtn);
+        generateBtn.disabled = false;
+        compileBtn.disabled = false;
+        
+        // Only enable iterate button if compile was successful
+        document.getElementById('iterateBtn').disabled = !compilationSuccess;
     }
 }
 
@@ -162,7 +202,7 @@ async function handleGenerateClick() {
  */
 async function generateShader(prompt) {
     try {
-        // Call the /api/generate-shader endpoint
+        console.log('Sending request to /api/generate-shader with prompt:', prompt);
         const response = await fetch('/api/generate-shader', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -170,15 +210,31 @@ async function generateShader(prompt) {
         });
         
         if (!response.ok) {
-            throw new Error(`Server responded with status: ${response.status}`);
+            throw new Error(`API request failed with status ${response.status}`);
         }
         
         const data = await response.json();
+        if (!data.response) {
+            throw new Error('Invalid API response');
+        }
         
-        // Parse the response to extract vertex and fragment shader code
-        return ShaderRenderer.parseShaders(data.response);
+        // Try to extract shader code from the LLM response
+        console.log('Parsing LLM response for shader code...');
+        const parsedResponse = ShaderRenderer.parseShaders(data.response);
+        if (!parsedResponse) {
+            throw new Error('Could not parse shader code from response');
+        }
+        
+        // Display any comments from the LLM before the shader code
+        const comments = extractLLMComments(data.response);
+        displayLLMComments(comments);
+        
+        // Store the saved screenshots from the server for later use
+        window.savedScreenshots = data.savedScreenshots || [];
+        
+        return parsedResponse;
     } catch (error) {
-        console.error('Error generating shader:', error);
+        console.error('Error in generateShader:', error);
         throw error;
     }
 }
@@ -193,27 +249,179 @@ async function generateShader(prompt) {
 // This function has been moved to shaderRenderer.js
 
 /**
+ * Start button loading animation with dots
+ * @param {HTMLElement} button - The button element to animate
+ * @param {string} baseText - The base text to show (e.g., "Generating")
+ */
+function startButtonAnimation(button, baseText) {
+    // If there's already an animation running, stop it first
+    if (buttonAnimationInterval) {
+        clearInterval(buttonAnimationInterval);
+        buttonAnimationInterval = null;
+    }
+    
+    // Store original text if not already stored
+    if (!button.dataset.originalText) {
+        button.dataset.originalText = button.textContent;
+    }
+    
+    // Capture the exact width with the original text
+    // First, store the current text
+    const currentText = button.textContent;
+    
+    // Then temporarily set the text back to original to measure exact width
+    button.textContent = button.dataset.originalText;
+    const exactWidth = button.offsetWidth;
+    
+    // Restore current text (which will be immediately changed below)
+    button.textContent = currentText;
+    
+    // Fix the width to exactly match the original text width
+    button.style.width = `${exactWidth}px`;
+    
+    // Initialize animation state
+    let dotCount = 0;
+    button.textContent = `${baseText}${'.'.repeat(dotCount)}${' '.repeat(3-dotCount)}`;
+    
+    // Start new animation interval
+    buttonAnimationInterval = setInterval(() => {
+        // Only update if the button still exists in the DOM
+        if (button && button.isConnected) {
+            // Cycle through 0, 1, 2, 3 dots
+            dotCount = (dotCount + 1) % 4;
+            button.textContent = `${baseText}${'.'.repeat(dotCount)}${' '.repeat(Math.max(0, 3-dotCount))}`;
+        } else {
+            // Button was removed, clear the interval
+            clearInterval(buttonAnimationInterval);
+            buttonAnimationInterval = null;
+        }
+    }, 500); // Change every half second
+}
+
+/**
+ * Stop button loading animation
+ * @param {HTMLElement} button - The button element to restore
+ */
+function stopButtonAnimation(button) {
+    // Clear the animation interval if it exists
+    if (buttonAnimationInterval) {
+        clearInterval(buttonAnimationInterval);
+        buttonAnimationInterval = null;
+    }
+    
+    // Only proceed if the button exists and is connected to the DOM
+    if (button && button.isConnected) {
+        // Restore original text if available
+        if (button.dataset.originalText) {
+            button.textContent = button.dataset.originalText;
+            delete button.dataset.originalText;
+        }
+        
+        // Let CSS handle the styling via the class rules
+        // This ensures consistent button appearance
+        button.style.width = '';
+    }
+}
+
+/**
+ * Extract LLM comments from the response
+ * @param {string} response - Raw LLM response text
+ * @returns {string} - Extracted comments
+ */
+function extractLLMComments(response) {
+    const fragmentMarker = '#-- FRAGMENT SHADER --#';
+    
+    if (response.includes(fragmentMarker)) {
+        // Extract everything before the marker
+        const commentsPart = response.substring(0, response.indexOf(fragmentMarker)).trim();
+        return commentsPart;
+    }
+    
+    // If no marker, return empty string
+    return '';
+}
+
+/**
+ * Display LLM comments in the UI
+ * @param {string} comments - LLM comments text
+ */
+function displayLLMComments(comments) {
+    const commentsContainer = document.getElementById('llmCommentsContainer');
+    const commentsElement = document.getElementById('llmComments');
+    
+    if (comments && comments.trim().length > 0) {
+        commentsElement.textContent = comments;
+        commentsContainer.classList.remove('d-none');
+    } else {
+        commentsElement.textContent = '';
+        commentsContainer.classList.add('d-none');
+    }
+}
+
+/**
  * Update status message in UI
  * @param {string} message - Status message to display
  */
 function updateStatusMessage(message) {
-    // You can implement this to show loading/status messages
     console.log('Status:', message);
+    
+    // Create or update status message element
+    let statusElement = document.getElementById('statusMessage');
+    
+    if (!statusElement) {
+        // Create the status message element if it doesn't exist
+        statusElement = document.createElement('div');
+        statusElement.id = 'statusMessage';
+        statusElement.className = 'alert alert-info mt-2';
+        
+        // Insert after the canvas
+        const canvasContainer = document.querySelector('#glCanvas').parentElement;
+        canvasContainer.appendChild(statusElement);
+    }
+    
+    // Update the message text
+    statusElement.textContent = message;
+    
+    // Show the message
+    statusElement.classList.remove('d-none');
+    
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+        statusElement.classList.add('fade-out');
+        setTimeout(() => {
+            statusElement.classList.add('d-none');
+            statusElement.classList.remove('fade-out');
+        }, 500);
+    }, 5000);
 }
 
 /**
  * Log an iteration to history
  * @param {object} iteration - Iteration data to log
+ * @param {array} savedScreenshots - Array of saved screenshot filenames from the server
  */
-function logIteration(iteration) {
-    // Get current history from localStorage or initialize empty array
-    const history = getIterationHistory();
+function logIteration(iteration, savedScreenshots = []) {
+    // If we have saved screenshots from the server, store their URLs instead of base64 data
+    if (savedScreenshots && savedScreenshots.length > 0) {
+        // Use the first screenshot for the history item
+        iteration.savedScreenshotUrl = `/screenshots/${savedScreenshots[0]}`;
+    }
     
-    // Add new iteration
+    // Ensure we have image data for this iteration
+    if (!iteration.imageData && !iteration.savedScreenshotUrl) {
+        // Use a default image or create a blank one
+        console.warn('No image data available for iteration ' + iteration.iteration);
+        iteration.imageData = canvas.toDataURL('image/png');
+    }
+    
+    const history = getIterationHistory() || [];
     history.push(iteration);
-    
-    // Store updated history
     localStorage.setItem('shaderIterationHistory', JSON.stringify(history));
+    console.log('Logged iteration:', iteration.iteration);
+    console.log('History size:', history.length, 'items');
+    if (iteration.savedScreenshotUrl) {
+        console.log('Using saved screenshot URL:', iteration.savedScreenshotUrl);
+    }
 }
 
 /**
@@ -246,228 +454,272 @@ function createMetrics(success, evaluation) {
 
 // Handle Compile button click
 function handleCompileClick() {
-    const vertexSource = document.getElementById('vertexShaderCode').value;
-    const fragmentSource = document.getElementById('fragmentShaderCode').value;
+    const fragmentShaderCode = shaderEditor.getValue();
     
-    // Try to compile and render the shader using ShaderRenderer
-    ShaderRenderer.setupShaderProgram(vertexSource, fragmentSource);
+    const success = ShaderRenderer.setupShaderProgram(fragmentShaderCode);
+    
+    if (!success) {
+        document.getElementById('iterateBtn').disabled = true;
+    } else {
+        document.getElementById('iterateBtn').disabled = false;
+    }
 }
 
 // Common auto-iteration function used by both handleGenerateClick and handleIterateClick
-async function autoIterateShader(prompt, initialVertexShader, initialFragmentShader, startIteration) {
-    const MAX_AUTO_ITERATIONS = 5; // Maximum number of iterations to attempt
-    let iterationCount = 0;
+async function autoIterateShader(prompt, initialFragmentShader, currentIteration, userFeedback = null) {
+    const MAX_AUTO_ITERATIONS = 3;
+    let autoIterationCount = 0; // Count auto-iterations separately
+    let currentFragmentShader = initialFragmentShader;
     let success = false;
-    let currentIteration = startIteration;
-    let currentVertex = initialVertexShader;
-    let currentFragment = initialFragmentShader;
     
-    // Clear any previous errors
-    document.getElementById('shaderError').classList.add('d-none');
-    
-    while (!success && iterationCount < MAX_AUTO_ITERATIONS) {
-        iterationCount++;
-        const iterationLabel = `Auto-Iteration ${iterationCount}/${MAX_AUTO_ITERATIONS}`;
-        
-        // Get user feedback (only used for manual iterations, empty for auto-iterations after generate)
-        const feedbackElement = document.getElementById('iterationFeedback');
-        const userFeedback = (startIteration > 0 && iterationCount === 1) ? 
-            (feedbackElement ? feedbackElement.value.trim() : '') : '';
-        
-        // Increment iteration counter
-        currentIteration++;
-        
-        // 1. Evaluate the current shader
-        updateStatusMessage(`${iterationLabel}: Evaluating shader...`);
-        const evaluation = await shaderEvaluator.evaluateShader(currentVertex, currentFragment);
-        
-        // 2. Log evaluation metrics
-        console.log(`${iterationLabel} shader evaluation:`, evaluation);
-        
-        // 3. Prepare simplified evaluation object for API
-        const simplifiedEvaluation = {
-            compiled: evaluation.compilationSuccess || false,
-            infoLog: evaluation.compileErrors || evaluation.linkErrors || '',
-            metrics: evaluation.metrics || {},
-            hasNaNs: evaluation.hasNaNs || false
-        };
-        
-        // 4. Get screenshot
-        const screenshotData = getOptimizedScreenshot(canvas);
-        
-        // 5. Call the /api/iterate endpoint
-        updateStatusMessage(`${iterationLabel}: Generating improved shader...`);
-        
-        let data;
-        try {
-            const response = await fetch('/api/iterate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    currentVertex: currentVertex,
-                    currentFragment: currentFragment,
-                    evaluation: simplifiedEvaluation,
-                    iteration: currentIteration,
-                    screenshots: screenshotData ? [screenshotData] : [],
-                    userFeedback: userFeedback
-                })
-            });
-            
-            if (!response.ok) {
-                throw new Error(`Server responded with status: ${response.status}`);
-            }
-            
-            data = await response.json();
-        } catch (fetchError) {
-            console.error(`Error during ${iterationLabel.toLowerCase()}:`, fetchError);
-            
-            if (iterationCount === 1 && startIteration > 0) {
-                // If this is the first manual iteration, fail completely
-                throw fetchError;
-            }
-            
-            // For auto-iterations, try to continue with next iteration
-            updateStatusMessage(`${iterationLabel}: Failed - ${fetchError.message}. Trying again...`);
-            continue;
-        }
-        
-        // 6. Parse the result
-        const result = ShaderRenderer.parseShaders(data.response);
-        
-        // Update the current shaders for the next iteration
-        currentVertex = result.vertexShader;
-        currentFragment = result.fragmentShader;
-        
-        // 7. Update the shader editors
-        document.getElementById('vertexShaderCode').value = result.vertexShader;
-        document.getElementById('fragmentShaderCode').value = result.fragmentShader;
-        
-        // 8. Compile and render the new shader
-        success = ShaderRenderer.setupShaderProgram(result.vertexShader, result.fragmentShader);
-        
-        // If the shader compiles successfully, consider it a success regardless of WebGL errors
-        // This prevents endless iteration when the shader compiles without syntax errors
-        if (success) {
-            // Log any WebGL errors but ignore them for auto-iteration stopping criteria
-            try {
-                const gl = canvas.getContext('webgl');
-                const errors = [];
-                let err;
-                while ((err = gl.getError()) !== gl.NO_ERROR) {
-                    errors.push(err);
-                }
-                
-                if (errors.length > 0) {
-                    console.log(`${iterationLabel}: Shader compiled with WebGL warnings (ignored):`, errors);
-                }
-            } catch (e) {
-                console.error('Error checking WebGL errors:', e);
-            }
-            
-            // If shaders compile successfully, stop auto-iteration regardless of WebGL errors
-            console.log(`${iterationLabel}: Compilation successful - stopping auto-iteration.`);
-        }
-        
-        // Capture the canvas state and metrics for potential logging
-        const imageData = canvas.toDataURL('image/png');
-        const metrics = createMetrics(success, evaluation);
-        
-        // Store iteration data for logging
-        const iterationData = {
-            iteration: currentIteration,
-            prompt,
-            vertexShader: result.vertexShader,
-            fragmentShader: result.fragmentShader,
-            success,
-            metrics,
-            imageData,
-            reflection: data.reflection || 'No reflection provided',
-            // Flag if this is the first manual iteration vs auto-iteration
-            isManualIteration: startIteration > 0 && iterationCount === 1,
-            isLastAutoIteration: success
-        };
-        
-        // For first iteration or successful iterations, always log them
-        if ((startIteration > 0 && iterationCount === 1) || success) {
-            // Log this iteration in history
-            logIteration(iterationData);
-            
-            // Update the UI
-            updateIterationHistory();
-            updateMetricsDisplay(metrics);
-        }
-        
-        if (success) {
-            updateStatusMessage(`${iterationLabel}: Success! Enter new feedback for further improvements.`);
-            
-            // Clear the feedback field and show it for the next iteration
-            if (document.getElementById('iterationFeedback')) {
-                document.getElementById('iterationFeedback').value = '';
-                document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-            }
-            
-            break;
-        } else if (iterationCount < MAX_AUTO_ITERATIONS) {
-            updateStatusMessage(`${iterationLabel}: Shader still has errors, continuing...`);
-        }
-    }
-    
-    // Always show the feedback field after iterations, even if auto-iteration failed
-    if (document.getElementById('iterationFeedback')) {
-        document.getElementById('iterationFeedback').value = '';
-        document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
-    }
-    
-    if (!success && iterationCount >= MAX_AUTO_ITERATIONS) {
-        updateStatusMessage(`Auto-iteration stopped after ${iterationCount} attempts. Enter specific feedback to fix remaining issues.`);
-        document.getElementById('shaderError').textContent = `Could not automatically fix all shader issues. Try providing specific feedback.`;
-        document.getElementById('shaderError').classList.remove('d-none');
-    }
-    
-    return success;
-}
-
-// Handle Iterate button click with auto-iteration until success
-async function handleIterateClick() {
-    // Prevent multiple clicks
-    document.getElementById('iterateBtn').disabled = true;
-    document.getElementById('generateBtn').disabled = true;
-    document.getElementById('compileBtn').disabled = true;
-    document.getElementById('iterateBtn').textContent = 'Iterating...';
+    // Find the iterate button to update during auto-iterations
+    const iterateBtn = document.getElementById('iterateBtn');
+    updateStatusMessage(`Iteration ${currentIteration}...`);
     
     try {
-        const prompt = document.getElementById('shaderPrompt').value;
-        const currentVertex = document.getElementById('vertexShaderCode').value;
-        const currentFragment = document.getElementById('fragmentShaderCode').value;
+        while (autoIterationCount < MAX_AUTO_ITERATIONS) {
+            // Update button text to show simple 'Iterating' text with animation
+            startButtonAnimation(iterateBtn, 'Iterating');
+            
+            // Get the evaluation from our shader evaluator
+            let evaluation = null;
+            
+            try {
+                evaluation = shaderEvaluator.evaluateShader(currentFragmentShader);
+                console.log('Shader evaluation:', evaluation);
+            } catch (evalError) {
+                console.error('Error during shader evaluation:', evalError);
+            }
+            
+            // Only try to get a screenshot if the shader is actually compiling
+            let screenshot = null;
+            let storageThumbnail = null;
+            
+            // Try to ensure we have the latest rendered frame
+            if (ShaderRenderer.isCompiled()) {
+                ShaderRenderer.renderFrame();
+                // Now get a screenshot for the current state of the shader
+                screenshot = getOptimizedScreenshot(canvas);
+                // Create a smaller thumbnail for localStorage
+                storageThumbnail = getThumbnailForStorage(canvas);
+            } else {
+                console.log('Cannot capture screenshot - shader not compiled');
+            }
+            
+            // Save the current state of the iteration with its screenshot before requesting improvements
+            logIteration({
+                iteration: currentIteration,
+                prompt,
+                fragmentShader: currentFragmentShader,
+                success: false, // It's not successful yet, that's why we're iterating
+                metrics: createMetrics(false, evaluation),
+                imageData: storageThumbnail || canvas.toDataURL('image/png'), // Fallback to regular screenshot
+                reflection: '',
+                isManualIteration: false,
+                isLastAutoIteration: false
+            }, []); // Empty array as we don't have saved screenshots from server yet
+            
+            // Update the iteration history display
+            updateIterationHistory();
+            
+            try {
+                // Call the API to refine the shader
+                const response = await fetch('/api/iterate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt, 
+                        currentFragment: currentFragmentShader,
+                        evaluation,
+                        screenshots: screenshot ? [screenshot] : [],
+                        iteration: currentIteration - 1, // Use the previous iteration number since we incremented it
+                        userFeedback: userFeedback || 'Fix the shader compilation errors and improve the visual quality'
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server responded with status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (!data.response) {
+                    throw new Error('Empty response from server');
+                }
+                
+                // Parse the response
+                const responseContent = data.response;
+                const reflection = data.reflection || '';
+                const newIterationCounter = data.iteration || currentIteration;
+                const savedScreenshots = data.savedScreenshots || [];
+                
+                // Store the saved screenshots for the next iteration
+                window.savedScreenshots = savedScreenshots;
+                
+                // Extract and display LLM comments
+                const comments = extractLLMComments(responseContent);
+                displayLLMComments(comments);
+                
+                // Parse the shader code from the LLM response
+                currentFragmentShader = ShaderRenderer.parseShaders(responseContent);
+                
+                // Update the CodeMirror editor with the new shader code
+                shaderEditor.setValue(currentFragmentShader);
+                
+                // Try to compile the new shader
+                success = ShaderRenderer.setupShaderProgram(currentFragmentShader);
+                
+                // Try to render one more frame to ensure the canvas has content
+                let resultScreenshot = null;
+                let storageThumbnail = null;
+                
+                if (ShaderRenderer.isCompiled()) {
+                    ShaderRenderer.renderFrame();
+                    // Get a screenshot of the result for the iteration history
+                    resultScreenshot = getOptimizedScreenshot(canvas);
+                    // Create a smaller thumbnail for localStorage
+                    storageThumbnail = getThumbnailForStorage(canvas);
+                } else {
+                    console.log('Cannot capture result screenshot - shader not compiled');
+                }
+                
+                // Now we're processing the next iteration with the updated shader
+                // Increment iteration counter for the next iteration
+                currentIteration++;
+                
+                // We don't log this iteration here - we'll log it at the beginning of the next loop
+                // or after we break out of the loop (if this was successful or the last iteration)
+                
+                // If this was successful or the last iteration, log the final state
+                if (success || autoIterationCount + 1 === MAX_AUTO_ITERATIONS) {
+                    // Try to ensure we have the latest rendered frame
+                    let finalThumbnail = storageThumbnail;
+                    if (ShaderRenderer.isCompiled()) {
+                        ShaderRenderer.renderFrame();
+                        finalThumbnail = getThumbnailForStorage(canvas);
+                    }
+                    
+                    // Log the final iteration state
+                    logIteration({
+                        iteration: currentIteration,
+                        prompt,
+                        fragmentShader: currentFragmentShader,
+                        success,
+                        metrics: createMetrics(success, evaluation),
+                        imageData: finalThumbnail,
+                        reflection: reflection,
+                        isManualIteration: false,
+                        isLastAutoIteration: true
+                    }, []);
+                    
+                    // Update the iteration history display
+                    updateIterationHistory();
+                }
+                
+                updateStatusMessage(`Iteration ${currentIteration} successful!`);
+                autoIterationCount++;
+                
+                if (success) {
+                    // We've successfully compiled, stop iterating
+                    break;
+                }
+                
+                // Continue to the next auto-iteration if we haven't reached the limit
+                if (autoIterationCount < MAX_AUTO_ITERATIONS) {
+                    updateStatusMessage(`Auto-iteration ${autoIterationCount + 1}/${MAX_AUTO_ITERATIONS}...`);
+                }
+            } catch (error) {
+                console.error('Error during auto-iteration:', error);
+                updateStatusMessage(`Auto-iteration failed: ${error.message}`);
+                document.getElementById('shaderError').textContent = `Auto-iteration error: ${error.message}`;
+                stopButtonAnimation(iterateBtn);
+                document.getElementById('shaderError').classList.remove('d-none');
+                break;
+            }
+        }
         
-        // Get current iteration count from history
-        const history = getIterationHistory();
-        const currentIteration = history.length > 0 ? 
-            Math.max(...history.map(item => item.iteration)) : 0;
+        // After auto-iteration, update the UI
+        // Make sure to stop the animation first
+        stopButtonAnimation(iterateBtn);
         
-        // Start auto-iteration
-        await autoIterateShader(prompt, currentVertex, currentFragment, currentIteration);
+        if (success) {
+            document.getElementById('iterateBtn').disabled = false;
+            document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
+            updateStatusMessage('Shader compiled successfully! Enter what you want to improve and click Iterate.');
+        } else {
+            updateStatusMessage('Auto-iteration complete, but shader still has errors. Try manual edits.');
+            document.getElementById('iterateBtn').disabled = true;
+            document.getElementById('iterationFeedbackContainer').classList.remove('d-none');
+        }
     } catch (error) {
-        console.error('Error iterating shader:', error);
-        document.getElementById('shaderError').textContent = `Error iterating shader: ${error.message}`;
+        console.error('General error during auto-iteration:', error);
+        updateStatusMessage('Auto-iteration failed with an error');
+        document.getElementById('shaderError').textContent = `Error: ${error.message}`;
         document.getElementById('shaderError').classList.remove('d-none');
-        updateStatusMessage('Failed to iterate shader.');
     } finally {
         document.getElementById('generateBtn').disabled = false;
         document.getElementById('compileBtn').disabled = false;
-        document.getElementById('iterateBtn').textContent = 'Iterate';
+        document.getElementById('generateBtn').textContent = 'Generate Shader';
+    }
+}
+
+// Handle Iterate button click
+async function handleIterateClick() {
+    // Get the current shader and the user's feedback
+    const fragmentShaderCode = shaderEditor.getValue();
+    const feedbackText = document.getElementById('iterationFeedback').value.trim();
+    
+    if (!feedbackText) {
+        alert('Please enter feedback on what you would like to improve');
+        return;
+    }
+    
+    const iterateBtn = document.getElementById('iterateBtn');
+    const generateBtn = document.getElementById('generateBtn');
+    const compileBtn = document.getElementById('compileBtn');
+    
+    iterateBtn.disabled = true;
+    generateBtn.disabled = true;
+    compileBtn.disabled = true;
+    
+    // Start animation for iterate button
+    startButtonAnimation(iterateBtn, 'Iterating');
+    
+    // Get the original prompt
+    const prompt = document.getElementById('shaderPrompt').value;
+    
+    // Iterate on the shader with current iteration count
+    try {
+        // Increment the global iteration counter
+        iterationCounter++;
+        // Pass the user's feedback to autoIterateShader
+        await autoIterateShader(prompt, fragmentShaderCode, iterationCounter, feedbackText);
         
-        // Only enable the iterate button if there's feedback text
-        const feedbackText = document.getElementById('iterationFeedback').value.trim();
-        document.getElementById('iterateBtn').disabled = !feedbackText;
+        // Ensure the button animation is stopped (in case autoIterateShader didn't)
+        const iterateBtn = document.getElementById('iterateBtn');
+        stopButtonAnimation(iterateBtn);
+    } catch (error) {
+        console.error('Error during iteration:', error);
+        document.getElementById('shaderError').textContent = `Iteration error: ${error.message}`;
+        document.getElementById('shaderError').classList.remove('d-none');
+    } finally {
+        // Stop the button animation and restore buttons
+        const iterateBtn = document.getElementById('iterateBtn');
+        const generateBtn = document.getElementById('generateBtn');
+        const compileBtn = document.getElementById('compileBtn');
+        
+        stopButtonAnimation(iterateBtn);
+        
+        iterateBtn.disabled = false;
+        generateBtn.disabled = false;
+        compileBtn.disabled = false;
     }
 }
 
 // Reflection feedback is now handled directly in the iteration history UI
 
 /**
- * Get an optimized screenshot from the canvas for faster transmission
+ * Get an optimized screenshot from the canvas for sending to LLM
  * @param {HTMLCanvasElement} canvas - The WebGL canvas element
  * @returns {string|null} - Base64 encoded image data, or null if failed
  */
@@ -517,6 +769,51 @@ function getOptimizedScreenshot(canvas) {
     }
 }
 
+/**
+ * Get a tiny thumbnail version of the canvas for storing in localStorage
+ * @param {HTMLCanvasElement} canvas - The WebGL canvas element
+ * @returns {string|null} - Base64 encoded thumbnail data, or null if failed
+ */
+function getThumbnailForStorage(canvas) {
+    try {
+        // Create an extremely small version of the canvas for localStorage
+        const maxDimension = 150; // Very small for localStorage storage
+        
+        // Calculate new dimensions while maintaining aspect ratio
+        let width = canvas.width;
+        let height = canvas.height;
+        
+        if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+                height = Math.floor(height * (maxDimension / width));
+                width = maxDimension;
+            } else {
+                width = Math.floor(width * (maxDimension / height));
+                height = maxDimension;
+            }
+        }
+        
+        // Create temporary canvas for resizing
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        
+        // Draw original canvas onto temp canvas to resize
+        const ctx = tempCanvas.getContext('2d');
+        ctx.fillStyle = '#000'; // Ensure background is filled
+        ctx.fillRect(0, 0, width, height); // Clear with black background
+        ctx.drawImage(canvas, 0, 0, width, height);
+        
+        // Get the data URL with minimal quality for storage
+        const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.25); // Extreme compression for localStorage
+        
+        return dataUrl;
+    } catch (error) {
+        console.error('Error creating thumbnail:', error);
+        return null;
+    }
+}
+
 // Update the iteration history display
 function updateIterationHistory() {
     const history = getIterationHistory();
@@ -547,10 +844,27 @@ function updateIterationHistory() {
         const itemElement = document.createElement('div');
         itemElement.className = 'iteration-item';
         
-        // Create thumbnail
+        // Create thumbnail with click functionality to restore shader
         const thumbnail = document.createElement('img');
-        thumbnail.src = item.imageData;
-        thumbnail.className = 'iteration-thumbnail mb-2';
+        // Use the saved screenshot URL if available, otherwise fall back to base64 data
+        thumbnail.src = item.savedScreenshotUrl || item.imageData;
+        thumbnail.className = 'iteration-thumbnail mb-2 cursor-pointer';
+        thumbnail.title = 'Click to restore this shader';
+        
+        // Add click handler to restore this shader
+        thumbnail.addEventListener('click', () => {
+            // Restore the shader code to the editor
+            shaderEditor.setValue(item.fragmentShader);
+            
+            // Compile and render the restored shader
+            const success = ShaderRenderer.setupShaderProgram(item.fragmentShader);
+            
+            // Update UI based on compilation result
+            document.getElementById('iterateBtn').disabled = !success;
+            
+            // Show a message
+            updateStatusMessage(`Restored ${iterationLabel}`);
+        });
         
         // Create iteration header
         const header = document.createElement('div');
@@ -609,10 +923,226 @@ function updateMetricsDisplay(metrics) {
     metricsContainer.appendChild(metricsList);
 }
 
+// Global counter for iterations
+let iterationCounter = 0;
+
+/**
+ * Toggle between dark and light theme
+ */
+function toggleTheme() {
+    const htmlElement = document.documentElement;
+    const themeToggleBtn = document.getElementById('themeToggle');
+    const iconElement = themeToggleBtn.querySelector('i');
+    const currentTheme = htmlElement.getAttribute('data-theme');
+    
+    // Toggle theme on document and CodeMirror simultaneously
+    if (currentTheme === 'dark') {
+        // Switch to light mode
+        htmlElement.removeAttribute('data-theme');
+        localStorage.setItem('theme', 'light');
+        iconElement.className = 'fa-solid fa-moon'; // Show moon in light mode
+        shaderEditor.setOption('theme', 'eclipse');
+    } else {
+        // Switch to dark mode
+        htmlElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+        iconElement.className = 'fa-solid fa-sun'; // Show sun in dark mode
+        shaderEditor.setOption('theme', 'monokai');
+    }
+}
+
+/**
+ * Initialize theme based on user preference or system preference
+ */
+function initTheme() {
+    const savedTheme = localStorage.getItem('theme');
+    const themeToggleBtn = document.getElementById('themeToggle');
+    const iconElement = themeToggleBtn.querySelector('i');
+    const shouldUseDarkTheme = savedTheme === 'dark' || 
+        (!savedTheme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    
+    // Apply theme to the document and CodeMirror simultaneously
+    if (shouldUseDarkTheme) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        iconElement.className = 'fa-solid fa-sun';
+        
+        // Set CodeMirror theme if editor is initialized
+        if (shaderEditor) {
+            shaderEditor.setOption('theme', 'monokai');
+        }
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+        iconElement.className = 'fa-solid fa-moon';
+        
+        // Set CodeMirror theme if editor is initialized
+        if (shaderEditor) {
+            shaderEditor.setOption('theme', 'eclipse');
+        }
+    }
+}
+
+/**
+ * Initialize speech recognition for a specific textarea
+ * @param {string} buttonId - ID of the microphone button
+ * @param {string} textareaId - ID of the textarea to receive transcribed text
+ */
+function initSpeechRecognition(buttonId, textareaId) {
+    const micButton = document.getElementById(buttonId);
+    const textarea = document.getElementById(textareaId);
+    
+    // Check if browser supports Speech Recognition
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+        console.error('Speech recognition not supported in this browser');
+        micButton.disabled = true;
+        micButton.title = 'Speech recognition not supported in this browser';
+        return;
+    }
+    
+    // Create a speech recognition instance
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SpeechRecognition();
+    
+    // Configure speech recognition
+    recognition.continuous = true; // Set to true to allow silence detection
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    
+    // Silence detection - will stop recording after 3 seconds of silence
+    const SILENCE_TIMEOUT = 2000; // 2 seconds
+    let silenceTimer = null;
+    
+    let finalTranscript = '';
+    let isRecording = false;
+    
+    // Handle microphone button click
+    micButton.addEventListener('click', () => {
+        if (isRecording) {
+            recognition.stop();
+            micButton.classList.remove('recording');
+            micButton.title = 'Use speech-to-text';
+        } else {
+            // Save the original text before starting
+            originalText = textarea.value.trim();
+            
+            // Reset transcript and update UI
+            finalTranscript = '';
+            micButton.classList.add('recording');
+            micButton.title = 'Stop recording';
+            
+            // Start listening
+            try {
+                recognition.start();
+                isRecording = true;
+            } catch (error) {
+                console.error('Speech recognition error:', error);
+                micButton.classList.remove('recording');
+            }
+        }
+    });
+    
+    // Store the original text that was in the textarea before recording started
+    let originalText = '';
+    
+    // Handle results
+    recognition.onresult = (event) => {
+        // Reset silence timer whenever speech is detected
+        if (silenceTimer) {
+            clearTimeout(silenceTimer);
+        }
+        
+        // Set a new silence timer
+        silenceTimer = setTimeout(() => {
+            if (isRecording) {
+                recognition.stop();
+            }
+        }, SILENCE_TIMEOUT);
+        
+        let interimTranscript = '';
+        finalTranscript = '';
+        
+        // Process all results, separating final from interim
+        for (let i = 0; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            
+            if (event.results[i].isFinal) {
+                finalTranscript += transcript + ' ';
+            } else {
+                interimTranscript += transcript;
+            }
+        }
+        
+        // Always start with the original text that was in the textarea before recording
+        let newText = originalText;
+        
+        // Add a space if there was original text
+        if (newText && (finalTranscript || interimTranscript)) {
+            newText += ' ';
+        }
+        
+        // Add final transcript first (the confirmed speech)
+        if (finalTranscript) {
+            newText += finalTranscript.trim();
+        }
+        
+        // Add interim transcript (the currently being processed speech)
+        if (interimTranscript) {
+            // If we have both final and interim, add a space in between
+            if (finalTranscript) newText += ' ';
+            newText += interimTranscript;
+        }
+        
+        // Update the textarea with the complete text
+        textarea.value = newText;
+    };
+    
+    // Handle end of speech recognition
+    recognition.onend = () => {
+        isRecording = false;
+        micButton.classList.remove('recording');
+        micButton.title = 'Use speech-to-text';
+        
+        // Manually trigger an input event on the textarea to enable buttons
+        // This is needed because the automatic silence detection doesn't trigger an input event
+        if (textarea.value.trim().length > 0) {
+            // Create and dispatch an input event
+            const inputEvent = new Event('input', {
+                bubbles: true,
+                cancelable: true,
+            });
+            textarea.dispatchEvent(inputEvent);
+        }
+    };
+    
+    // Handle errors
+    recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        isRecording = false;
+        micButton.classList.remove('recording');
+        micButton.title = 'Use speech-to-text';
+        
+        // Also trigger an input event in case of error to ensure buttons are enabled
+        if (textarea.value.trim().length > 0) {
+            // Create and dispatch an input event
+            const inputEvent = new Event('input', {
+                bubbles: true,
+                cancelable: true,
+            });
+            textarea.dispatchEvent(inputEvent);
+        }
+    };
+}
+
 // Initialize WebGL when the DOM is fully loaded
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', () => {
     // Initialize WebGL
     initWebGL();
+    
+    // Initialize speech recognition for shader prompt and iteration feedback
+    initSpeechRecognition('shaderPromptMic', 'shaderPrompt');
+    initSpeechRecognition('iterationFeedbackMic', 'iterationFeedback');
+    
+    // Initialize theme after DOM is loaded
+    initTheme();
     
     // Show the iteration feedback field when Generate completes successfully
     document.getElementById('generateBtn').addEventListener('click', function() {

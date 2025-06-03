@@ -101,36 +101,52 @@ class ShaderEvaluator {
     _setUniforms(program, uniforms) {
         const gl = this.gl;
         
-        // Common uniforms
-        if (uniforms.uTime !== undefined) {
-            const location = gl.getUniformLocation(program, 'uTime');
-            if (location) gl.uniform1f(location, uniforms.uTime);
-        }
+        // Set all standard uniforms used in Shadertoy-style fragment shaders
+        const standardUniforms = {
+            // Always provide these even if not in uniforms parameter
+            uTime: uniforms.uTime !== undefined ? uniforms.uTime : 0.0,
+            uResolution: uniforms.uResolution !== undefined ? uniforms.uResolution : [this.canvas.width, this.canvas.height],
+            uMouse: uniforms.uMouse !== undefined ? uniforms.uMouse : [0.5, 0.5],
+            uMouseClick: uniforms.uMouseClick !== undefined ? uniforms.uMouseClick : [0.5, 0.5],
+            uIsMouseDown: uniforms.uIsMouseDown !== undefined ? uniforms.uIsMouseDown : 0,
+            uFrame: uniforms.uFrame !== undefined ? uniforms.uFrame : 0,
+            uAspect: uniforms.uAspect !== undefined ? uniforms.uAspect : this.canvas.width / this.canvas.height
+        };
         
-        if (uniforms.uResolution !== undefined) {
-            const location = gl.getUniformLocation(program, 'uResolution');
-            if (location) gl.uniform2fv(location, uniforms.uResolution);
-        }
-        
-        // Custom uniforms
-        for (const [name, value] of Object.entries(uniforms)) {
-            if (name !== 'uTime' && name !== 'uResolution') {
-                const location = gl.getUniformLocation(program, name);
-                
-                if (location) {
-                    // Detect type and set uniform accordingly
-                    if (typeof value === 'number') {
-                        gl.uniform1f(location, value);
-                    } else if (Array.isArray(value)) {
-                        switch (value.length) {
-                            case 2: gl.uniform2fv(location, value); break;
-                            case 3: gl.uniform3fv(location, value); break;
-                            case 4: gl.uniform4fv(location, value); break;
-                            // Add more cases as needed
-                        }
+        // Set all standard uniforms
+        for (const [name, value] of Object.entries(standardUniforms)) {
+            const location = gl.getUniformLocation(program, name);
+            if (location) {
+                if (typeof value === 'number') {
+                    gl.uniform1f(location, value);
+                } else if (Array.isArray(value)) {
+                    switch (value.length) {
+                        case 2: gl.uniform2fv(location, value); break;
+                        case 3: gl.uniform3fv(location, value); break;
+                        case 4: gl.uniform4fv(location, value); break;
                     }
-                    // Add more types as needed
                 }
+            }
+        }
+        
+        // Set any additional custom uniforms
+        for (const [name, value] of Object.entries(uniforms)) {
+            // Skip standard uniforms already set
+            if (standardUniforms.hasOwnProperty(name)) continue;
+            
+            const location = gl.getUniformLocation(program, name);
+            if (location) {
+                // Detect type and set uniform accordingly
+                if (typeof value === 'number') {
+                    gl.uniform1f(location, value);
+                } else if (Array.isArray(value)) {
+                    switch (value.length) {
+                        case 2: gl.uniform2fv(location, value); break;
+                        case 3: gl.uniform3fv(location, value); break;
+                        case 4: gl.uniform4fv(location, value); break;
+                    }
+                }
+                // Add support for textures or other types as needed
             }
         }
     }
@@ -159,8 +175,8 @@ class ShaderEvaluator {
         
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
         
-        // Set up attribute
-        const positionLocation = gl.getAttribLocation(program, 'position');
+        // Set up attribute (using aPosition as in our fixed vertex shader)
+        const positionLocation = gl.getAttribLocation(program, 'aPosition');
         if (positionLocation !== -1) {
             gl.enableVertexAttribArray(positionLocation);
             gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
@@ -197,7 +213,9 @@ class ShaderEvaluator {
         for (let i = 0; i < frames; i++) {
             this.renderScene(program, 'quad', {
                 uTime: this.options.baseTime + (i / frames) * this.options.timeJitterAmount,
-                uResolution: [this.canvas.width, this.canvas.height]
+                uResolution: [this.canvas.width, this.canvas.height],
+                uFrame: i,
+                uAspect: this.canvas.width / this.canvas.height
             });
         }
         
@@ -220,7 +238,9 @@ class ShaderEvaluator {
             // Render with jittered time
             this.renderScene(program, scene, {
                 uTime: this.options.baseTime + Math.random() * this.options.timeJitterAmount,
-                uResolution: [this.canvas.width, this.canvas.height]
+                uResolution: [this.canvas.width, this.canvas.height],
+                uFrame: i,
+                uAspect: this.canvas.width / this.canvas.height
             });
             
             // Capture canvas as PNG
@@ -275,13 +295,32 @@ class ShaderEvaluator {
     }
 
     /**
-     * Fully evaluate a shader pair and return detailed results
-     * @param {string} vertexSource - Vertex shader source
+     * Fixed vertex shader for fragment-only workflow (like Shadertoy)
+     * @private
+     * @returns {string} - Fixed vertex shader source
+     */
+    _getFixedVertexShader() {
+        return `
+            attribute vec4 aPosition;
+            varying vec2 vUv;
+            
+            void main() {
+                vUv = aPosition.xy * 0.5 + 0.5;
+                gl_Position = aPosition;
+            }
+        `;
+    }
+
+    /**
+     * Fully evaluate a fragment shader and return detailed results
      * @param {string} fragmentSource - Fragment shader source
      * @returns {Object} - Evaluation results
      */
-    async evaluateShader(vertexSource, fragmentSource) {
+    async evaluateShader(fragmentSource) {
         const gl = this.gl;
+        
+        // Use fixed vertex shader
+        const vertexSource = this._getFixedVertexShader();
         
         // Compile shaders
         const vertexResult = this.compileShader(vertexSource, gl.VERTEX_SHADER);

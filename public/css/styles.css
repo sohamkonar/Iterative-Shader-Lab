@@ -1,23 +1,52 @@
+:root {
+    /* Light theme variables */
+    --bg-color: #f4f7f9;
+    --text-color: #212529;
+    --card-bg: #ffffff;
+    --card-header-bg: #f8f9fa;
+    --border-color: #ddd;
+    --code-bg: #f8f9fa;
+    --btn-border: rgba(0, 0, 0, 0.125);
+    --shadow-color: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="dark"] {
+    /* Dark theme variables with better contrast */
+    --bg-color: #121212;
+    --text-color: #ffffff;
+    --card-bg: #1e1e1e;
+    --card-header-bg: #2d2d2d;
+    --border-color: #444;
+    --code-bg: #2d2d2d;
+    --btn-border: rgba(255, 255, 255, 0.2);
+    --shadow-color: rgba(0, 0, 0, 0.3);
+}
+
+/* No transitions - instant theme changes */
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: #f4f7f9;
+    background-color: var(--bg-color);
+    color: var(--text-color);
     padding: 20px 0;
 }
 
 .card {
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 4px var(--shadow-color);
+    background-color: var(--card-bg);
+    border-color: var(--border-color);
 }
 
 .card-header {
-    background-color: #f8f9fa;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+    background-color: var(--card-header-bg);
+    border-bottom: 1px solid var(--btn-border);
 }
 
 #glCanvas {
     width: 100%;
     height: auto;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-color);
     border-radius: 4px;
     background-color: #000;
 }
@@ -37,19 +66,210 @@ body {
     padding: 10px;
     margin-bottom: 10px;
     border-radius: 4px;
-    background-color: #f8f9fa;
+    background-color: var(--code-bg);
     border-left: 4px solid #007bff;
 }
 
 .iteration-item .metrics {
     font-size: 0.85rem;
-    color: #6c757d;
+    color: var(--text-color);
+    opacity: 0.7;
 }
 
 .iteration-thumbnail {
     width: 100px;
     height: 100px;
     object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+}
+
+.cursor-pointer {
+    cursor: pointer;
+}
+
+/* CodeMirror customization */
+.CodeMirror {
+    height: 350px;
     border: 1px solid #ddd;
     border-radius: 4px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+}
+
+.CodeMirror-linenumber {
+    padding: 0 8px;
+    color: #999;
+}
+
+/* Button sizing and animations */
+#generateBtn, #iterateBtn {
+    white-space: nowrap;
+    text-align: center;
+}
+
+/* LLM Comments */
+.text-pre-wrap {
+    white-space: pre-wrap;
+    font-family: var(--bs-font-monospace);
+    font-size: 0.875rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+#llmComments {
+    white-space: pre-wrap;
+    font-family: monospace;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+/* Theme toggle button styles */
+#themeToggle {
+    background-color: transparent;
+    font-size: 1.25rem;
+    color: var(--text-color);
+    border: none;
+    width: 40px;
+    height: 40px;
+}
+
+#themeToggle:hover {
+    background-color: rgba(128, 128, 128, 0.2);
+    border-radius: 50%;
+}
+
+[data-theme="dark"] #themeToggle {
+    color: #f8f9fa;
+}
+
+[data-theme="dark"] #themeToggle i.fa-sun {
+    color: #f8f9fa;
+}
+
+/* Dark mode styles for form elements */
+[data-theme="dark"] .form-control,
+[data-theme="dark"] .form-select,
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+    background-color: #2d2d2d;
+    border-color: #444;
+    color: #ffffff;
+}
+
+[data-theme="dark"] .form-control:focus,
+[data-theme="dark"] .form-select:focus,
+[data-theme="dark"] input:focus,
+[data-theme="dark"] textarea:focus,
+[data-theme="dark"] select:focus {
+    background-color: #2d2d2d;
+    border-color: #666;
+    color: #ffffff;
+    box-shadow: 0 0 0 0.25rem rgba(66, 140, 255, 0.5);
+}
+
+[data-theme="dark"] .btn-primary {
+    background-color: #0d6efd;
+}
+
+[data-theme="dark"] .btn-secondary {
+    background-color: #5a6268;
+}
+
+[data-theme="dark"] .list-group-item {
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    border-color: var(--border-color);
+}
+
+/* Additional dark mode styles for specific components */
+[data-theme="dark"] #shaderDescription,
+[data-theme="dark"] #iterationFeedback,
+[data-theme="dark"] .CodeMirror-code,
+[data-theme="dark"] .CodeMirror {
+    color: #ffffff !important;
+}
+
+/* No transitions for CodeMirror */
+
+/* Override Bootstrap's dark input styling which might be causing issues */
+[data-theme="dark"] .form-control::placeholder {
+    color: rgba(255, 255, 255, 0.6);
+}
+
+/* Ensure dropdowns and other components are visible */
+[data-theme="dark"] .dropdown-menu {
+    background-color: #2d2d2d;
+    border-color: #444;
+}
+
+[data-theme="dark"] .dropdown-item {
+    color: #ffffff;
+}
+
+[data-theme="dark"] .dropdown-item:hover {
+    background-color: #3d3d3d;
+    color: #ffffff;
+}
+
+/* Bootstrap card overrides */
+[data-theme="dark"] .card-header {
+    background-color: var(--card-header-bg);
+    color: var(--text-color);
+    border-bottom-color: var(--border-color);
+}
+
+[data-theme="dark"] .card-body {
+    background-color: var(--card-bg);
+    color: var(--text-color);
+}
+
+/* Ensure all textareas have proper styling */
+[data-theme="dark"] textarea {
+    background-color: #2d2d2d !important;
+    color: #ffffff !important;
+}
+
+/* Microphone button styling */
+.mic-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    background-color: var(--card-bg);
+    border-color: var(--border-color);
+    color: var(--text-color);
+}
+
+.mic-btn:hover {
+    background-color: var(--card-header-bg);
+}
+
+.mic-btn.recording {
+    color: #dc3545;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+/* Dark mode microphone button */
+[data-theme="dark"] .mic-btn {
+    background-color: #2d2d2d;
+    border-color: #444;
+}
+
+/* Status message animation */
+.fade-out {
+    opacity: 0;
+    transition: opacity 0.5s ease-in-out;
+}
+
+#statusMessage {
+    opacity: 1;
+    transition: opacity 0.5s ease-in-out;
 }
